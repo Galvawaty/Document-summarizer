@@ -249,11 +249,8 @@ def train(
     
     tokenizer = get_tokenizer()
     
-    # TODO: Untuk saat ini skip dataloader creation
-    # Gunakan finetune_indobert.py yang sudah ada untuk training
-    # Hanya return hasil untuk sekarang
-    
-    logger.warning("Note: Using simplified pipeline without full dataloader creation")
+    # Nonaktifkan penggunaan dataset Hugging Face, hanya gunakan dataset lokal
+    logger.warning("Note: Hanya menggunakan dataset lokal, dataset Hugging Face dinonaktifkan")
     
     # ─── Build model ───────────────────────────────────────────
     logger.info(f"\n[6/6] Building IndoBERT model...")

@@ -450,6 +450,11 @@ def create_bio_tags(text: str, entities: List[Dict]) -> Tuple[List[str], List[st
     """
     Hasilkan pasangan (tokens, bio_tags) menggunakan spaCy tokenizer.
 
+    Prioritas labeling:
+      - Label spesifik (pendek) diproses TERAKHIR sehingga bisa overwrite
+        label umum (ISI, TABEL) yang mencakup area luas.
+      - Ini memastikan token mendapat label paling spesifik yang tersedia.
+
     Returns:
         tokens   : List[str] token
         bio_tags : List[str] tag BIO
@@ -461,25 +466,40 @@ def create_bio_tags(text: str, entities: List[Dict]) -> Tuple[List[str], List[st
     # Buat char-level tag untuk setiap karakter
     char_tags = ["O"] * len(text)
 
-    # Sort entities agar tidak tumpang tindih
-    sorted_ents = sorted(entities, key=lambda e: e["start"])
+    # Label umum (panjang, mencakup area luas) diproses DULUAN,
+    # label spesifik (pendek) diproses BELAKANGAN agar bisa overwrite.
+    # Urutkan: entity terpanjang dulu, terpendek terakhir.
+    BROAD_LABELS = {"ISI", "TABEL"}
+    
+    # ISI dan TABEL di-EXCLUDE dari NER training karena mereka mencakup
+    # hampir seluruh dokumen, menyebabkan 0% O-tokens.
+    # Label ini ditangani oleh rule-based postprocessing.
+    NER_EXCLUDE_LABELS = {"ISI", "TABEL"}
+    
+    sorted_ents = sorted(
+        [e for e in entities if e["label"] in LABELS and e["label"] not in NER_EXCLUDE_LABELS],
+        key=lambda e: (
+            -(e["end"] - e["start"]),  # panjang duluan
+        ),
+    )
 
     for ent in sorted_ents:
         start = ent["start"]
         end   = ent["end"]
         label = ent["label"]
 
-        if label not in LABELS:
-            continue
-
         # Clamp ke batas text
         start = max(0, min(start, len(text)))
         end = max(start, min(end, len(text)))
 
-        # Hindari overwrite entity lama kalau overlap
+        is_specific = label not in BROAD_LABELS
+
         for i in range(start, end):
-            if char_tags[i] != "O":
+            existing = char_tags[i]
+            # Jangan overwrite label yang sudah ada (first-come priority)
+            if existing != "O":
                 continue
+
             if i == start:
                 char_tags[i] = f"B-{label}"
             else:

@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────
+# requirements-api.txt
+# Dependencies untuk API deployment (Cloud Run)
+# Menggunakan CPU-only PyTorch untuk ukuran image lebih kecil
+# ─────────────────────────────────────────────────────────────
+
+# ── Web Framework ────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+
+# ── NLP / ML ─────────────────────────────────────────────────
+spacy==3.7.4
+transformers==4.40.2
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+sentencepiece==0.2.0
+accelerate==0.29.3
+
+# ── PDF Processing ───────────────────────────────────────────
+pymupdf==1.23.26
+Pillow==10.3.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+
+# ── OCR (optional — bisa dihapus jika hanya pure PDF) ───────
+# paddlepaddle==2.6.2
+# paddleocr==2.7.3
+
+# ── Utilities ────────────────────────────────────────────────
+loguru>=0.7.0
+protobuf==3.20.0
+pydantic>=2.0.0
+
+# ── Data ─────────────────────────────────────────────────────
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+--extra-index-url https://download.pytorch.org/whl/cpu

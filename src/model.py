@@ -45,11 +45,11 @@ def build_model(
     """
     if from_checkpoint and Path(from_checkpoint).exists():
         logger.info(f"Memuat model dari checkpoint: {from_checkpoint}")
+        # Pastikan checkpoint yang digunakan hasil fine-tune dari IndoBERT HuggingFace
         model = AutoModelForTokenClassification.from_pretrained(
             from_checkpoint,
             id2label=ID2LABEL,
             label2id=LABEL2ID,
-            ignore_mismatched_sizes=True,
         )
     else:
         logger.info(f"Inisialisasi model dari pretrained: {pretrained}")
@@ -64,7 +64,6 @@ def build_model(
         model = AutoModelForTokenClassification.from_pretrained(
             pretrained,
             config=config,
-            ignore_mismatched_sizes=True,
         )
 
     total_params     = sum(p.numel() for p in model.parameters())

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+from datetime import datetime
 import math
 import os
 import sys
@@ -338,7 +340,7 @@ def finetune_indobert(
     output_dir: str         = str(CKPT_DIR / "indobert-ner-finetuned"),
     epochs: int             = 10,
     batch_size: int         = 8,
-    learning_rate: float    = 2e-5,
+    learning_rate: float    = 3e-5,
     classifier_lr: float    = 5e-5,
     weight_decay: float     = 0.01,
     warmup_ratio: float     = 0.1,
@@ -348,8 +350,9 @@ def finetune_indobert(
     unfreeze_n: int         = 2,
     unfreeze_every: int     = 2,
     fp16: bool              = True,
-    patience: int           = 3,
+    patience: int           = 5,
     combine_hf: bool        = False,
+    resume_from: Optional[str] = None,
     seed: int               = 42,
 ):
     """
@@ -392,23 +395,10 @@ def finetune_indobert(
 
     # ── Load & prep data ──────────────────────────────────────
     # Strategy: Gunakan HF dataset + local jika dipilih
-    if combine_hf:
-        try:
-            from src.dataset import load_dataset_combined
-            combined_samp = load_dataset_combined(
-                hf_only=False,
-                local_path=dataset_path,
-                hf_split="train"
-            )
-            logger.info(f"Combined: HF + local total {len(combined_samp)} samples")
-        except Exception as e:
-            logger.error(f"Gagal combine HF + local: {e}")
-            raise
-    else:
-        # Default: gunakan local dataset saja
-        logger.info(f"Hanya menggunakan dataset lokal: {dataset_path}")
-        local_raw = load_json_dataset(dataset_path)
-        combined_samp = build_training_samples(local_raw)
+    # Nonaktifkan penggunaan dataset Hugging Face, hanya gunakan dataset lokal
+    logger.info(f"Hanya menggunakan dataset lokal: {dataset_path}")
+    local_raw = load_json_dataset(dataset_path)
+    combined_samp = build_training_samples(local_raw)
     
     # Split: train/val/test dari combined dataset
     train_data, val_data, test_data = split_dataset(combined_samp, seed=seed)
@@ -419,7 +409,23 @@ def finetune_indobert(
     val_ds   = NERDataset(val_data)
 
     # ── Build model ───────────────────────────────────────────
-    model = build_model()
+    # Tentukan checkpoint: --resume > best checkpoint > pretrained
+    best_ckpt_dir = str(Path(output_dir) / "best")
+    actual_resume = None
+
+    if resume_from:
+        if Path(resume_from).exists():
+            actual_resume = resume_from
+            logger.info(f"  🔄 Resume dari checkpoint yang ditentukan: {resume_from}")
+        else:
+            logger.warning(f"  ⚠️  Checkpoint tidak ditemukan: {resume_from}, fallback ke pretrained.")
+    elif Path(best_ckpt_dir).exists() and (Path(best_ckpt_dir) / "config.json").exists():
+        actual_resume = best_ckpt_dir
+        logger.info(f"  🔄 Auto-resume dari best checkpoint: {best_ckpt_dir}")
+    else:
+        logger.info("  🆕 Tidak ada checkpoint, memulai dari pretrained IndoBERT.")
+
+    model = build_model(from_checkpoint=actual_resume)
 
     # ── Callbacks ─────────────────────────────────────────────
     callbacks = [
@@ -502,6 +508,13 @@ def finetune_indobert(
     trainer.save_model(output_dir)
     get_tokenizer().save_pretrained(output_dir)
 
+    # ── Simpan salinan best checkpoint (agar tidak tertimpa run berikutnya) ──
+    best_dir = Path(output_dir) / "best"
+    best_dir.mkdir(parents=True, exist_ok=True)
+    trainer.save_model(str(best_dir))
+    get_tokenizer().save_pretrained(str(best_dir))
+    logger.info(f"  ✅ Best checkpoint disimpan terpisah: {best_dir}")
+
     # ── Evaluasi test set ─────────────────────────────────────
     if test_data:
         test_ds = NERDataset(test_data)
@@ -535,6 +548,25 @@ def finetune_indobert(
     report_path = Path(output_dir) / "finetune_report.json"
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # ── Append ke training history (kumulatif) ────────────────
+    history_path = Path(output_dir) / "training_history.json"
+    if history_path.exists():
+        with open(history_path, "r", encoding="utf-8") as f:
+            history = json.load(f)
+    else:
+        history = []
+
+    history_entry = {
+        "run_id":    len(history) + 1,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        **report,
+    }
+    history.append(history_entry)
+
+    with open(history_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    logger.info(f"  Training history disimpan: {history_path} (run #{history_entry['run_id']})")
 
     # ── Print Summary ─────────────────────────────────────────
     logger.info("\n" + "="*70)
@@ -574,6 +606,10 @@ def parse_args():
     p.add_argument("--strategy",     default="full",
                    choices=["full", "llrd", "progressive"],
                    help="full: LR seragam | llrd: decay per layer | progressive: unfreeze bertahap")
+    p.add_argument("--resume",       type=str, default=None,
+                   help="Path ke checkpoint untuk resume training (default: auto-detect best)")
+    p.add_argument("--from-scratch", action="store_true",
+                   help="Force training dari pretrained IndoBERT, abaikan checkpoint yang ada")
     p.add_argument("--epochs",       type=int,   default=10)
     p.add_argument("--batch",        type=int,   default=8,
                    help="Batch size per device (default 8 untuk RTX 3060 6GB)")
@@ -585,7 +621,7 @@ def parse_args():
     p.add_argument("--accum",        type=int,   default=2,
                    help="Gradient accumulation steps (default 2 → effective batch=16)")
     p.add_argument("--smoothing",    type=float, default=0.0,
-                   help="Label smoothing epsilon (0.0=off, 0.1=recommended)")
+                   help="Label smoothing epsilon (0.0=off, 0.1=recommended untuk dataset besar)")
     p.add_argument("--llrd-decay",   type=float, default=0.9,
                    help="Faktor decay LLRD per layer (0.8–0.95)")
     p.add_argument("--unfreeze-n",   type=int,   default=2,
@@ -606,6 +642,10 @@ if __name__ == "__main__":
     args = parse_args()
     # --no-fp16 override
     use_fp16 = args.fp16 and not args.no_fp16
+
+    # --from-scratch: paksa mulai dari pretrained, abaikan checkpoint
+    resume = None if args.from_scratch else args.resume
+
     finetune_indobert(
         dataset_path        = args.dataset,
         strategy            = args.strategy,
@@ -624,5 +664,6 @@ if __name__ == "__main__":
         fp16                = use_fp16,
         patience            = args.patience,
         combine_hf          = args.combine_hf,
+        resume_from         = resume,
         seed                = args.seed,
     )

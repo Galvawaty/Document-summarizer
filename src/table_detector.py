@@ -1,28 +1,3 @@
-"""
-src/table_detector.py
-Deteksi Tabel menggunakan LayoutLMv3 (microsoft/layoutlmv3-base).
-
-LayoutLMv3 memahami dokumen secara multimodal:
-  - Teks (words)
-  - Layout (bounding boxes dalam koordinat [0,1000])
-  - Gambar (patch visual dari halaman)
-
-Alur deteksi:
-  1. Ekstrak words + bounding boxes dari PDF via PyMuPDF
-  2. Feed ke LayoutLMv3Processor + LayoutLMv3ForTokenClassification
-  3. Prediksi label per token → kumpulkan span label "TABEL"
-  4. Kembalikan sebagai List[TableSpan] dengan confidence & teks blok tabel
-
-Fallback:
-  - Jika PDF scanned atau bbox tidak tersedia, gunakan dummy bbox
-    berdasarkan posisi relatif teks (line-number based normalization)
-  - Jika LayoutLM tidak terinstall, raise ImportError yang informatif
-
-Model default : microsoft/layoutlmv3-base  (zero-shot atau fine-tuned)
-                Dapat di-override via checkpoint lokal yang sudah ditraining
-                dengan label B-TABEL / I-TABEL / O
-"""
-
 from __future__ import annotations
 
 import re

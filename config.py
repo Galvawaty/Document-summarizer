@@ -37,7 +37,6 @@ LOCAL_LABELS: List[str] = [
     "ISI",           # Label 7  — isi utama dokumen (rule-based + NER)
     "TABEL",         # Label 8  — blok tabel (rule-based hybrid + LayoutLMv3)
     "LOKASI",        # Label 9  (dataset baru)
-    "WAKTU",         # Label 10 (dataset baru)
 ]
 
 # Label dari HuggingFace indo-ner-dataset (general NER)
