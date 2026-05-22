@@ -22,6 +22,68 @@ from config import ID2LABEL, LABEL2ID, LABELS, model_cfg
 
 
 # ─────────────────────────────────────────────────────────────
+# Pola kop surat / header institusi yang harus di-ignore
+# ─────────────────────────────────────────────────────────────
+_KOP_SURAT_PATTERNS = [
+    # Nama kementerian / institusi
+    re.compile(r'^\s*KEMENTERIAN\b', re.IGNORECASE),
+    re.compile(r'^\s*DAN\s+TEKNOLOGI\s*$', re.IGNORECASE),
+    re.compile(r'^\s*POLITEKNIK\s+NEGERI\b', re.IGNORECASE),
+    re.compile(r'^\s*UNIVERSITAS\b', re.IGNORECASE),
+    re.compile(r'^\s*INSTITUT\s+TEKNOLOGI\b', re.IGNORECASE),
+    re.compile(r'^\s*SEKOLAH\s+TINGGI\b', re.IGNORECASE),
+    # Alamat kampus
+    re.compile(r'^\s*Jalan\s+', re.IGNORECASE),
+    re.compile(r'^\s*Jl\.?\s+', re.IGNORECASE),
+    # Telepon / Fax
+    re.compile(r'^\s*Tele(?:pon|p)\.?\s*[:(]', re.IGNORECASE),
+    re.compile(r'^\s*(?:Telp|Fax|Faks)\.?\s*[:(]', re.IGNORECASE),
+    re.compile(r'^\s*\(?\d{3,4}\)?\s*\d{5,}', re.IGNORECASE),
+    # URL / Email
+    re.compile(r'^\s*Laman\s*:', re.IGNORECASE),
+    re.compile(r'^\s*(?:Website|Web|Email|Posel|E-?mail)\s*:', re.IGNORECASE),
+    re.compile(r'^\s*https?://', re.IGNORECASE),
+    # Garis pembatas kop
+    re.compile(r'^\s*[=\-_]{5,}\s*$'),
+]
+
+
+def _strip_kop_surat(text: str) -> str:
+    """
+    Hapus blok kop surat (header institusi) dari bagian atas dokumen.
+
+    Kop surat biasanya terdiri dari beberapa baris berturut-turut di awal
+    teks yang mengandung nama kementerian, nama institusi, alamat, telepon,
+    fax, laman, dan email. Fungsi ini menghapus baris-baris tersebut.
+    """
+    lines = text.split("\n")
+    skip_until = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue  # lewati baris kosong
+
+        matched = False
+        for pat in _KOP_SURAT_PATTERNS:
+            if pat.search(stripped):
+                matched = True
+                break
+
+        if matched:
+            skip_until = i + 1
+        else:
+            # Begitu menemukan baris non-header pertama, berhenti
+            break
+
+    if skip_until > 0:
+        logger.debug(f"[KopSurat] Melewati {skip_until} baris header institusi")
+        return "\n".join(lines[skip_until:])
+
+    return text
+
+
+# ─────────────────────────────────────────────────────────────
 # Model & tokenizer loading (singleton)
 # ─────────────────────────────────────────────────────────────
 _model: Optional[AutoModelForTokenClassification] = None
@@ -213,12 +275,32 @@ def _extract_perihal_from_text(text: str) -> Optional[str]:
     return None
 
 
+_PERIHAL_FALLBACK_DOC_TYPES = [
+    "nota dinas",
+    "surat keterangan lulus",
+    "surat keterangan",
+    "pengumuman pengalihan perkuliahan",
+]
+
+
+def _extract_fallback_perihal(text: str) -> Optional[str]:
+    if not text:
+        return None
+    normalized_text = text.lower()
+    for doc_type in _PERIHAL_FALLBACK_DOC_TYPES:
+        if doc_type in normalized_text:
+            return doc_type
+    return None
+
+
 def _extract_isi_from_text(text: str, max_chars: int = 800) -> Optional[str]:
     """
     Ekstrak isi utama dokumen secara rule-based.
     Cari paragraf setelah baris 'Perihal' atau setelah pembuka surat,
     kecualikan baris header/metadata.
     """
+    # Hapus kop surat terlebih dahulu agar tidak masuk ke ISI
+    text = _strip_kop_surat(text)
     lines = text.split("\n")
 
     # Temukan posisi setelah baris 'Perihal'
@@ -261,7 +343,20 @@ def _extract_isi_from_text(text: str, max_chars: int = 800) -> Optional[str]:
 
     isi = " ".join(paragraphs)
     isi = re.sub(r'\s+', ' ', isi).strip()
-    return isi[:max_chars] if len(isi) > max_chars else isi
+
+    # Syarat berhenti apabila kalimat sudah selesai dan berakhiran dengan (.)
+    if len(isi) > max_chars:
+        truncated = isi[:max_chars]
+        last_period = truncated.rfind('.')
+        if last_period != -1:
+            return truncated[:last_period + 1].strip()
+        return truncated
+    else:
+        if not isi.endswith('.'):
+            last_period = isi.rfind('.')
+            if last_period != -1:
+                return isi[:last_period + 1].strip()
+        return isi
 
 
 def _extract_table_content(
@@ -356,11 +451,21 @@ def run_ner(
     if perihal:
         entities["PERIHAL"] = perihal
 
+    # Jika PERIHAL tetap kosong, gunakan jenis dokumen fallback seperti
+    # nota dinas, surat keterangan lulus, surat keterangan, atau
+    # pengumuman pengalihan perkuliahan.
+    if not entities.get("PERIHAL"):
+        fallback_perihal = _extract_fallback_perihal(text)
+        if fallback_perihal:
+            entities["PERIHAL"] = fallback_perihal
+
     # ── Ekstrak ISI (isi utama dokumen) ─────────────────────────
-    if not entities.get("ISI"):
-        isi = _extract_isi_from_text(text)
-        if isi:
-            entities["ISI"] = isi
+    # Selalu gunakan rule-based extraction untuk ISI karena:
+    # 1. NER sering menghasilkan ISI yang mengandung kop surat
+    # 2. Rule-based sudah menghapus kop surat via _strip_kop_surat
+    isi = _extract_isi_from_text(text)
+    if isi:
+        entities["ISI"] = isi
 
     # ── Deteksi TABEL dengan LayoutLMv3 ─────────────────────────
     tabel_content = _extract_table_content(text, pdf_path=pdf_path)

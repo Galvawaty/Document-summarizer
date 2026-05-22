@@ -44,6 +44,7 @@ def _create_summary(filename: str, text: str, entities: Dict[str, Any]) -> str:
         pdf_path      = filename,
         pdf_type      = "unknown",
         page_count    = 0,
+        raw_text      = text,
     )
 
     para  = output.get("paragraph_summary", "")
@@ -298,21 +299,23 @@ def inference(
     model_checkpoint: Optional[str] = None,
     save_output: bool = True,
     verbose: bool = True,
+    skip_header_footer: bool = True,
 ) -> Dict[str, Any]:
     """
-    Jalankan NER pada satu PDF document.
+    Jalankan NER pada satu dokumen (PDF atau DOCX).
     
     Args:
-        pdf_path: Path ke file PDF.
+        pdf_path: Path ke file PDF atau DOCX.
         output_dir: Folder untuk simpan hasil JSON (optional).
         model_checkpoint: Custom model path (jika None, gunakan default).
         save_output: Simpan hasil ke JSON file.
         verbose: Tampilkan detail log.
+        skip_header_footer: Potong header/footer dari PDF (default True).
     
     Returns:
         Dictionary dengan NER results dan metadata.
     """
-    from src.pdf_handler import extract_text_from_pdf, pages_to_full_text
+    from src.pdf_handler import extract_text_from_document, pages_to_full_text
     from src.inference import load_model, run_ner
 
     pdf_path = Path(pdf_path)
@@ -331,9 +334,12 @@ def inference(
 
     # Extract text from PDF
     if verbose:
-        logger.info(f"[2/3] Ekstrak teks dari PDF...")
+        logger.info(f"[2/3] Ekstrak teks dari dokumen...")
     try:
-        pages = extract_text_from_pdf(pdf_path)
+        pages = extract_text_from_document(
+            pdf_path,
+            skip_header_footer=skip_header_footer,
+        )
         full_text = pages_to_full_text(pages)
         if verbose:
             logger.info(f"  ✓ Ekstraksi berhasil: {len(full_text)} karakter")
@@ -384,6 +390,7 @@ def inference(
             pdf_path      = str(pdf_path),
             pdf_type      = pdf_type_str,
             page_count    = len(pages),
+            raw_text      = full_text,
         )
         # Tambahkan raw entities untuk kompatibilitas
         structured["entities_raw"] = entities
@@ -430,15 +437,21 @@ def batch_inference(
         return {"status": "error", "error": "Not a directory"}
 
     # Cari semua PDF
-    pdf_files = list(pdf_paths.glob("**/*.pdf")) + list(pdf_paths.glob("**/*.PDF"))
+    # Cari PDF dan DOCX
+    pdf_files = (
+        list(pdf_paths.glob("**/*.pdf"))
+        + list(pdf_paths.glob("**/*.PDF"))
+        + list(pdf_paths.glob("**/*.docx"))
+        + list(pdf_paths.glob("**/*.DOCX"))
+    )
     pdf_files = [f for f in pdf_files if f.is_file()]
 
     if not pdf_files:
-        logger.warning(f"Tidak ada PDF ditemukan di: {pdf_paths}")
-        return {"status": "error", "error": "No PDF files found", "results": []}
+        logger.warning(f"Tidak ada PDF/DOCX ditemukan di: {pdf_paths}")
+        return {"status": "error", "error": "No PDF/DOCX files found", "results": []}
 
     logger.info(f"\n{'='*70}")
-    logger.info(f"  Batch Inference: {len(pdf_files)} PDF(s)")
+    logger.info(f"  Batch Inference: {len(pdf_files)} dokumen (PDF/DOCX)")
     logger.info(f"{'='*70}")
 
     results = []

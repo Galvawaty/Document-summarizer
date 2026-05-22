@@ -21,14 +21,22 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 # Regex patterns for extraction
-_NOMOR_SURAT_PATTERN = re.compile(r"\d{3}/PL3\.A\.9/PK\.01\.00/\d{4}")
+_EXTRACT_NOMOR_SURAT_PATTERN = re.compile(
+    r"(?:(?:No\.?|Nomor)\s*(?:Surat)?\s*[:\-]?\s*)?"
+    r"(\d+\s*/\s*[A-Z0-9.\-]+(?:\s*/\s*[A-Z0-9.\-]+)+\s*/\s*\d{4})",
+    re.IGNORECASE,
+)
 _TANGGAL_PATTERN = re.compile(r"(Depok,?\s*)?(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", re.IGNORECASE)
 _JENIS_DOKUMEN_PATTERN = re.compile(r"Hal\s*:\s*(.+)", re.IGNORECASE)
+_PENERIMA_PATTERN = re.compile(
+    r"(?:Kepada\s+)?Yth\.?\s*\n?(.*?)(?=\n\s*(?:Dengan\s+hormat|Assalamu\s*alaikum|Salam\s+sejahtera|Dengan\s+Hormat))",
+    re.IGNORECASE | re.DOTALL
+)
 
 # Extraction functions
 def extract_nomor_surat(text: str) -> Optional[str]:
-    m = _NOMOR_SURAT_PATTERN.search(text)
-    return m.group(0) if m else None
+    m = _EXTRACT_NOMOR_SURAT_PATTERN.search(text)
+    return normalize_nomor_surat(m.group(1)) if m else None
 
 def extract_tanggal(text: str) -> Optional[str]:
     m = _TANGGAL_PATTERN.search(text)
@@ -41,13 +49,40 @@ def extract_jenis_dokumen(text: str) -> Optional[str]:
     m = _JENIS_DOKUMEN_PATTERN.search(text)
     return m.group(1).strip() if m else None
 
+def extract_penerima(text: str) -> Optional[str]:
+    m = _PENERIMA_PATTERN.search(text)
+    if m:
+        lines = [line.strip() for line in m.group(1).split("\n")]
+        lines = [line for line in lines if line]
+        return "\n".join(lines)
+    return None
+
+
+# Dokumen yang dapat dijadikan fallback PERIHAL
+_PERIHAL_FALLBACK_DOC_TYPES = [
+    "nota dinas",
+    "surat keterangan lulus",
+    "surat keterangan",
+    "pengumuman pengalihan perkuliahan",
+]
+
+
+def _extract_fallback_perihal(text: str) -> Optional[str]:
+    if not text:
+        return None
+    normalized_text = text.lower()
+    for doc_type in _PERIHAL_FALLBACK_DOC_TYPES:
+        if doc_type in normalized_text:
+            return doc_type
+    return None
+
 
 # ─────────────────────────────────────────────────────────────
 # Normalisasi
 # ─────────────────────────────────────────────────────────────
 # Pola nomor surat umum Indonesia: 001/SK/Div/2024
 _NOMOR_SURAT_PATTERN = re.compile(
-    r"\d{1,4}\s*/\s*[A-Z0-9.\-]+(?:\s*/\s*[A-Z0-9.\-]+)*\s*/\s*\d{4}", re.IGNORECASE
+    r"\d+\s*/\s*[A-Z0-9.\-]+(?:\s*/\s*[A-Z0-9.\-]+)*\s*/\s*\d{4}", re.IGNORECASE
 )
 
 # Kata bulan Indonesia → angka
@@ -94,12 +129,78 @@ def normalize_nomor_surat(raw: str) -> str:
     return re.sub(r"\s*/\s*", "/", raw).strip()
 
 
+def is_junk_value(val: str) -> bool:
+    """Cek apakah nilai entitas merupakan sampah (hanya tanda baca/sangat pendek)."""
+    if not val:
+        return True
+    cleaned = re.sub(r'[^\w\s]', '', val).strip()
+    if not cleaned:
+        return True
+    if len(cleaned) == 1 and not cleaned.isdigit():
+        return True
+    return False
+
+
+def is_valid_nomor_surat(val: Any) -> bool:
+    """Validasi apakah nomor surat masuk akal (mengandung angka dan tanda slash/hubung)."""
+    if not val:
+        return False
+    if isinstance(val, list):
+        return any(is_valid_nomor_surat(v) for v in val)
+    val_str = str(val).strip()
+    if "/" in val_str and any(c.isdigit() for c in val_str) and len(val_str) > 5:
+        return True
+    return False
+
+
+def is_valid_jenis_dokumen(val: Any) -> bool:
+    """Validasi apakah jenis dokumen masuk akal (mengandung kata deskriptif)."""
+    if not val:
+        return False
+    if isinstance(val, list):
+        return any(is_valid_jenis_dokumen(v) for v in val)
+    val_str = str(val).strip()
+    cleaned = re.sub(r'[^\w\s]', '', val_str).strip()
+    if len(cleaned) < 3:
+        return False
+    if cleaned.isdigit():
+        return False
+    if not any(c.isalpha() for c in cleaned):
+        return False
+    if cleaned.lower() in ("halaman", "hal"):
+        return False
+    return True
+
+
+def is_valid_tanggal(val: Any) -> bool:
+    """Validasi apakah tanggal masuk akal (mengandung digit dan bukan string kosong/sampah)."""
+    if not val:
+        return False
+    if isinstance(val, list):
+        return any(is_valid_tanggal(v) for v in val)
+    val_str = str(val).strip()
+    if not any(c.isdigit() for c in val_str):
+        return False
+    if len(val_str) < 6:
+        return False
+    return True
+
+
 def normalize_value(label: str, value: Any) -> Any:
     """Dispatch normalisasi berdasarkan label."""
     if value is None:
         return None
     if isinstance(value, list):
-        return [normalize_value(label, v) for v in value]
+        cleaned_list = []
+        for v in value:
+            v_norm = normalize_value(label, v)
+            if v_norm and not is_junk_value(v_norm):
+                cleaned_list.append(v_norm)
+        if not cleaned_list:
+            return None
+        if len(cleaned_list) == 1:
+            return cleaned_list[0]
+        return cleaned_list
     value = str(value).strip()
     if label == "TANGGAL":
         return normalize_tanggal(value)
@@ -210,9 +311,22 @@ def generate_paragraph_summary(
 
     # — Sinopsis isi dokumen ————————————————————————
     if isi:
-        isi_short = isi[:200].rstrip()
         if len(isi) > 200:
-            isi_short += "..."
+            truncated = isi[:200]
+            last_period = truncated.rfind('.')
+            if last_period != -1:
+                isi_short = truncated[:last_period + 1].strip()
+            else:
+                isi_short = truncated.rstrip() + "..."
+        else:
+            if not isi.endswith('.'):
+                last_period = isi.rfind('.')
+                if last_period != -1:
+                    isi_short = isi[:last_period + 1].strip()
+                else:
+                    isi_short = isi
+            else:
+                isi_short = isi
         parts.append(f"Isi dokumen menyatakan: \u201c{isi_short}\u201d")
 
     # — Info tabel (dari LayoutLMv3) ———————————————————
@@ -251,6 +365,7 @@ def build_output_json(
     pdf_type: str       = "unknown",
     page_count: int     = 0,
     ocr_confidence: Optional[float] = None,
+    raw_text: str       = "",
     extra_meta: Optional[Dict] = None,
 ) -> Dict[str, Any]:
     """
@@ -262,6 +377,7 @@ def build_output_json(
         pdf_type        : "pure" atau "scanned"
         page_count      : Jumlah halaman PDF
         ocr_confidence  : Rata-rata confidence OCR (None jika pure PDF)
+        raw_text        : Teks ekstraksi PDF untuk fallback regex
         extra_meta      : Metadata tambahan dari pengguna
 
     Returns:
@@ -272,6 +388,53 @@ def build_output_json(
         label: normalize_value(label, value)
         for label, value in raw_entities.items()
     }
+
+    # Fallback regex extraction jika NER tidak menghasilkan NOMOR_SURAT / JENIS_DOKUMEN atau jika hasilnya tidak valid
+    if not is_valid_nomor_surat(normalized.get("NOMOR_SURAT")):
+        if raw_text:
+            normalized["NOMOR_SURAT"] = extract_nomor_surat(raw_text)
+        else:
+            normalized["NOMOR_SURAT"] = None
+
+    if not is_valid_jenis_dokumen(normalized.get("JENIS_DOKUMEN")):
+        if raw_text:
+            normalized["JENIS_DOKUMEN"] = extract_jenis_dokumen(raw_text)
+        else:
+            normalized["JENIS_DOKUMEN"] = None
+
+    # Fallback regex untuk TANGGAL jika tidak terdeteksi oleh NER atau tidak valid
+    if not is_valid_tanggal(normalized.get("TANGGAL")):
+        if raw_text:
+            normalized["TANGGAL"] = extract_tanggal(raw_text)
+        else:
+            normalized["TANGGAL"] = None
+
+    # Fallback/Penyempurnaan PENERIMA menggunakan regex
+    if raw_text:
+        reg_penerima = extract_penerima(raw_text)
+        if reg_penerima:
+            ner_penerima = normalized.get("PENERIMA")
+            if not ner_penerima:
+                normalized["PENERIMA"] = reg_penerima
+            else:
+                # Jika hasil NER hanya sebagian kecil dari hasil regex, gunakan hasil regex yang lebih lengkap
+                ner_str = str(ner_penerima).strip()
+                if len(reg_penerima) > len(ner_str) and (ner_str.lower() in reg_penerima.lower()):
+                    normalized["PENERIMA"] = reg_penerima
+
+    # Jika PERIHAL kosong tetapi dokumen adalah tipe khusus seperti nota dinas,
+    # surat keterangan, pengumuman pengalihan perkuliahan, gunakan jenis
+    # dokumen tersebut sebagai perihal.
+    if normalized.get("PERIHAL") is None:
+        fallback_perihal = None
+        if normalized.get("JENIS_DOKUMEN"):
+            jenis = str(normalized["JENIS_DOKUMEN"]).strip().lower()
+            if any(doc_type in jenis for doc_type in _PERIHAL_FALLBACK_DOC_TYPES):
+                fallback_perihal = normalized["JENIS_DOKUMEN"]
+        if fallback_perihal is None and raw_text:
+            fallback_perihal = _extract_fallback_perihal(raw_text)
+        if fallback_perihal:
+            normalized["PERIHAL"] = fallback_perihal
 
     completeness = compute_completeness(normalized)
     filename     = Path(pdf_path).name if pdf_path else ""

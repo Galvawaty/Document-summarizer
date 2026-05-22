@@ -8,7 +8,7 @@ Perintah tersedia:
   finetune  → Fine-tuning lanjutan (LLRD / progressive / spaCy)
   evaluate  → Evaluasi model pada test set
   run       → Satu perintah: prepare + train sekaligus
-  predict   → Inferensi satu atau banyak PDF → JSON
+  predict   → Inferensi satu atau banyak PDF/DOCX → JSON
 
 Contoh:
   python main.py prepare  --zip export.zip
@@ -17,6 +17,7 @@ Contoh:
   python main.py evaluate --dataset data/raw/dataset.json
   python main.py run      --zip export.zip
   python main.py predict  --pdf surat.pdf
+  python main.py predict  --pdf surat.docx
   python main.py predict  --pdf folder_surat/ --batch
 """
 
@@ -290,8 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--augment-n", type=int,   default=5)
 
     # ── predict ───────────────────────────────────────────────
-    pi = sub.add_parser("predict", help="Inferensi PDF → JSON ringkasan")
-    pi.add_argument("--pdf",     required=True, help="Path PDF atau folder (dengan --batch)")
+    pi = sub.add_parser("predict", help="Inferensi PDF/DOCX → JSON ringkasan")
+    pi.add_argument("--pdf",     required=True, help="Path PDF/DOCX atau folder (dengan --batch)")
     pi.add_argument("--output",  default=str(OUTPUT_DIR))
     pi.add_argument("--model",   default=None,  help="Override checkpoint model")
     pi.add_argument("--batch",   action="store_true", help="Proses semua PDF dalam folder")

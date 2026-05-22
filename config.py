@@ -112,6 +112,16 @@ class PDFConfig:
     ocr_use_gpu: bool          = False
     # Ukuran max gambar (px) sebelum OCR
     max_img_size: int          = 4096
+    # Rasio area header/footer yang dipotong per halaman (0.0 = nonaktif)
+    # Header: bagian atas halaman (kop surat institusi, nomor halaman atas)
+    # Footer: bagian bawah halaman (alamat, telepon, website, nomor halaman bawah)
+    header_ratio: float        = 0.12          # Potong 12% area atas tiap halaman
+    footer_ratio: float        = 0.10          # Potong 10% area bawah tiap halaman
+    skip_header_footer: bool   = True          # Aktifkan pemotongan header/footer
+
+
+# Ekstensi file dokumen yang didukung
+ALLOWED_DOC_EXTENSIONS = {".pdf", ".docx"}
 
 
 # ─────────────────────────────────────────────────────────────

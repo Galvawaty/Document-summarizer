@@ -28,6 +28,13 @@ except ImportError:
     _PADDLEOCR_AVAILABLE = False
     logger.warning("PaddleOCR tidak terinstall. Scanned PDF tidak akan bisa dibaca.")
 
+try:
+    from docx import Document as DocxDocument
+    _DOCX_AVAILABLE = True
+except ImportError:
+    _DOCX_AVAILABLE = False
+    logger.warning("python-docx tidak terinstall. DOCX tidak akan bisa dibaca.")
+
 
 # ─────────────────────────────────────────────────────────────
 # Data model
@@ -36,8 +43,8 @@ except ImportError:
 class PageText:
     page_number: int
     text: str
-    source: str          # "pure" | "ocr"
-    confidence: float    # 1.0 untuk pure, rata-rata confidence OCR untuk scanned
+    source: str          # "pure" | "ocr" | "docx"
+    confidence: float    # 1.0 untuk pure/docx, rata-rata confidence OCR untuk scanned
 
 
 # ─────────────────────────────────────────────────────────────
@@ -87,10 +94,21 @@ def is_scanned_pdf(pdf_path: str | Path, char_threshold: int = 50) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────
-# Pure PDF extractor (PyMuPDF)
+# Pure PDF extractor (PyMuPDF) — dengan crop header/footer
 # ─────────────────────────────────────────────────────────────
-def extract_pure_pdf(pdf_path: str | Path) -> List[PageText]:
-    """Ekstrak teks dari PDF pure menggunakan PyMuPDF."""
+def extract_pure_pdf(
+    pdf_path: str | Path,
+    skip_header_footer: bool = True,
+    header_ratio: float = 0.12,
+    footer_ratio: float = 0.10,
+) -> List[PageText]:
+    """
+    Ekstrak teks dari PDF pure menggunakan PyMuPDF.
+
+    Jika skip_header_footer=True, area atas (header_ratio) dan bawah
+    (footer_ratio) dari setiap halaman dipotong agar kop surat dan
+    footer institusi tidak ikut terbaca.
+    """
     if not _PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF tidak terinstall. Jalankan: pip install pymupdf")
 
@@ -98,8 +116,23 @@ def extract_pure_pdf(pdf_path: str | Path) -> List[PageText]:
     doc = fitz.open(str(pdf_path))
 
     for page_num, page in enumerate(doc, start=1):
-        raw_text = page.get_text("text")          # mode teks biasa
-        cleaned  = _clean_text(raw_text)
+        if skip_header_footer and (header_ratio > 0 or footer_ratio > 0):
+            # Hitung clip rectangle — potong area header dan footer
+            rect = page.rect                     # fitz.Rect(x0, y0, x1, y1)
+            page_height = rect.height
+            y_top    = rect.y0 + page_height * header_ratio
+            y_bottom = rect.y1 - page_height * footer_ratio
+            clip = fitz.Rect(rect.x0, y_top, rect.x1, y_bottom)
+
+            raw_text = page.get_text("text", sort=True, clip=clip)
+            logger.debug(
+                f"  [Pure] Hal. {page_num}: clip y={y_top:.0f}-{y_bottom:.0f} "
+                f"(header={header_ratio*100:.0f}%, footer={footer_ratio*100:.0f}%)"
+            )
+        else:
+            raw_text = page.get_text("text", sort=True)
+
+        cleaned = _clean_text(raw_text)
         results.append(PageText(
             page_number=page_num,
             text=cleaned,
@@ -114,6 +147,7 @@ def extract_pure_pdf(pdf_path: str | Path) -> List[PageText]:
 
 # ─────────────────────────────────────────────────────────────
 # Scanned PDF extractor (PyMuPDF render → PaddleOCR)
+# — dengan crop header/footer
 # ─────────────────────────────────────────────────────────────
 def extract_scanned_pdf(
     pdf_path: str | Path,
@@ -121,9 +155,15 @@ def extract_scanned_pdf(
     lang: str = "id",
     use_gpu: bool = False,
     max_img_size: int = 4096,
+    skip_header_footer: bool = True,
+    header_ratio: float = 0.12,
+    footer_ratio: float = 0.10,
 ) -> List[PageText]:
     """
     Render setiap halaman PDF ke gambar, lalu jalankan PaddleOCR.
+
+    Jika skip_header_footer=True, gambar di-crop untuk menghilangkan
+    area header dan footer sebelum OCR dijalankan.
     """
     if not _PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF tidak terinstall.")
@@ -146,6 +186,18 @@ def extract_scanned_pdf(
 
         # Load ke PIL, resize jika terlalu besar
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+        # Crop header/footer dari gambar
+        if skip_header_footer and (header_ratio > 0 or footer_ratio > 0):
+            w, h = img.size
+            y_top    = int(h * header_ratio)
+            y_bottom = int(h * (1 - footer_ratio))
+            img = img.crop((0, y_top, w, y_bottom))
+            logger.debug(
+                f"    Crop header/footer: y={y_top}-{y_bottom} "
+                f"(header={header_ratio*100:.0f}%, footer={footer_ratio*100:.0f}%)"
+            )
+
         if max(img.size) > max_img_size:
             ratio = max_img_size / max(img.size)
             new_size = (int(img.width * ratio), int(img.height * ratio))
@@ -216,7 +268,81 @@ def _clean_text(text: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# Main entry point
+# DOCX extractor (python-docx) — otomatis skip header/footer
+# ─────────────────────────────────────────────────────────────
+def extract_text_from_docx(docx_path: str | Path) -> List[PageText]:
+    """
+    Ekstrak teks dari file DOCX menggunakan python-docx.
+
+    DOCX menyimpan header dan footer secara terpisah dari body document,
+    sehingga secara default hanya body paragraphs yang dibaca (header
+    dan footer otomatis ter-skip).
+
+    Tabel dalam DOCX juga diekstrak dan digabungkan ke teks.
+
+    Returns:
+        List[PageText] — karena DOCX tidak punya konsep "halaman" secara
+        native, seluruh isi dikembalikan sebagai satu PageText (page 1).
+    """
+    if not _DOCX_AVAILABLE:
+        raise RuntimeError(
+            "python-docx tidak terinstall. Jalankan: pip install python-docx"
+        )
+
+    docx_path = Path(docx_path)
+    logger.info(f"Membaca DOCX: {docx_path.name}")
+
+    doc = DocxDocument(str(docx_path))
+
+    # ── Ekstrak paragraf body (otomatis tanpa header/footer) ──
+    paragraphs: list[str] = []
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text:
+            paragraphs.append(text)
+
+    # ── Ekstrak tabel ────────────────────────────────────────
+    table_texts: list[str] = []
+    for table_idx, table in enumerate(doc.tables):
+        rows_text: list[str] = []
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            # Hapus duplikat sel yang terjadi karena merged cells
+            unique_cells: list[str] = []
+            for c in cells:
+                if c and (not unique_cells or c != unique_cells[-1]):
+                    unique_cells.append(c)
+            if unique_cells:
+                rows_text.append(" | ".join(unique_cells))
+        if rows_text:
+            table_texts.append(
+                f"[Tabel {table_idx + 1}]\n" + "\n".join(rows_text)
+            )
+
+    # ── Gabungkan paragraf dan tabel ─────────────────────────
+    body_text = "\n".join(paragraphs)
+    if table_texts:
+        body_text += "\n\n[KONTEKS TABEL]\n" + "\n\n".join(table_texts)
+
+    cleaned = _clean_text(body_text)
+
+    result = [
+        PageText(
+            page_number=1,
+            text=cleaned,
+            source="docx",
+            confidence=1.0,
+        )
+    ]
+
+    logger.info(f"  ✓ DOCX berhasil dibaca: {len(cleaned)} karakter, "
+                f"{len(paragraphs)} paragraf, {len(doc.tables)} tabel")
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Main entry point — PDF
 # ─────────────────────────────────────────────────────────────
 def extract_text_from_pdf(
     pdf_path: str | Path,
@@ -224,6 +350,9 @@ def extract_text_from_pdf(
     dpi: int = 200,
     lang: str = "id",
     use_gpu: bool = False,
+    skip_header_footer: bool = True,
+    header_ratio: float = 0.12,
+    footer_ratio: float = 0.10,
 ) -> List[PageText]:
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -233,10 +362,78 @@ def extract_text_from_pdf(
 
     if is_scanned_pdf(pdf_path, char_threshold=char_threshold):
         logger.info("→ Jenis PDF: SCANNED → menggunakan PaddleOCR")
-        return extract_scanned_pdf(pdf_path, dpi=dpi, lang=lang, use_gpu=use_gpu)
+        return extract_scanned_pdf(
+            pdf_path, dpi=dpi, lang=lang, use_gpu=use_gpu,
+            skip_header_footer=skip_header_footer,
+            header_ratio=header_ratio,
+            footer_ratio=footer_ratio,
+        )
     else:
         logger.info("→ Jenis PDF: PURE → menggunakan PyMuPDF")
-        return extract_pure_pdf(pdf_path)
+        return extract_pure_pdf(
+            pdf_path,
+            skip_header_footer=skip_header_footer,
+            header_ratio=header_ratio,
+            footer_ratio=footer_ratio,
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# Dispatcher: PDF atau DOCX
+# ─────────────────────────────────────────────────────────────
+def extract_text_from_document(
+    file_path: str | Path,
+    char_threshold: int = 50,
+    dpi: int = 200,
+    lang: str = "id",
+    use_gpu: bool = False,
+    skip_header_footer: bool = True,
+    header_ratio: float = 0.12,
+    footer_ratio: float = 0.10,
+) -> List[PageText]:
+    """
+    Dispatcher utama: deteksi tipe file (PDF/DOCX) dan ekstrak teks.
+
+    - PDF  → extract_text_from_pdf() dengan header/footer cropping
+    - DOCX → extract_text_from_docx() (header/footer otomatis ter-skip)
+
+    Args:
+        file_path: Path ke file dokumen (.pdf atau .docx)
+        char_threshold: Threshold karakter untuk menentukan PDF pure vs scanned
+        dpi: DPI render untuk scanned PDF
+        lang: Bahasa PaddleOCR
+        use_gpu: Gunakan GPU untuk PaddleOCR
+        skip_header_footer: Potong header/footer (hanya berlaku untuk PDF)
+        header_ratio: Rasio area atas yang dipotong (0.0-1.0)
+        footer_ratio: Rasio area bawah yang dipotong (0.0-1.0)
+
+    Returns:
+        List[PageText] — teks per halaman (atau satu elemen untuk DOCX)
+    """
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"File tidak ditemukan: {file_path}")
+
+    ext = file_path.suffix.lower()
+
+    if ext == ".pdf":
+        return extract_text_from_pdf(
+            file_path,
+            char_threshold=char_threshold,
+            dpi=dpi,
+            lang=lang,
+            use_gpu=use_gpu,
+            skip_header_footer=skip_header_footer,
+            header_ratio=header_ratio,
+            footer_ratio=footer_ratio,
+        )
+    elif ext == ".docx":
+        return extract_text_from_docx(file_path)
+    else:
+        raise ValueError(
+            f"Tipe file tidak didukung: '{ext}'. "
+            f"Gunakan .pdf atau .docx"
+        )
 
 
 def pages_to_full_text(pages: List[PageText]) -> str:
@@ -256,6 +453,9 @@ def extract_text_and_tables(
     use_gpu: bool        = False,
     table_style: str     = "kv",
     merge_tables: bool   = True,
+    skip_header_footer: bool = True,
+    header_ratio: float  = 0.12,
+    footer_ratio: float  = 0.10,
     
 ) -> dict:
     from src.table_extractor import extract_tables_from_pdf, tables_to_ner_context
@@ -266,7 +466,10 @@ def extract_text_and_tables(
     # Ekstrak teks biasa
     pages      = extract_text_from_pdf(
         pdf_path, char_threshold=char_threshold,
-        dpi=dpi, lang=lang, use_gpu=use_gpu
+        dpi=dpi, lang=lang, use_gpu=use_gpu,
+        skip_header_footer=skip_header_footer,
+        header_ratio=header_ratio,
+        footer_ratio=footer_ratio,
     )
     full_text  = pages_to_full_text(pages)
 

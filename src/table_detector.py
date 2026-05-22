@@ -155,7 +155,7 @@ def extract_words_and_boxes(
         page_height = page.rect.height or 1
 
         # get_text("words") → list of (x0,y0,x1,y1,word,block_no,line_no,word_no)
-        raw_words = page.get_text("words")
+        raw_words = page.get_text("words", sort=True)
 
         for w in raw_words:
             x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
@@ -176,9 +176,10 @@ def extract_words_and_boxes(
             all_words.append(wb)
             char_offset += len(text) + 1  # +1 untuk spasi
 
+    page_count = len(doc)
     doc.close()
-    logger.debug(f"[LayoutLM] Diekstrak {len(all_words)} kata dari {doc.page_count} halaman")
-    return all_words, doc.page_count
+    logger.debug(f"[LayoutLM] Diekstrak {len(all_words)} kata dari {page_count} halaman")
+    return all_words, page_count
 
 
 def normalize_bbox(
@@ -308,6 +309,7 @@ def _predict_labels_layoutlm(
         scores : List[float] — confidence score per kata
     """
     import torch
+    from PIL import Image
     _load_layoutlm(model_path)
 
     processor = _layoutlm_processor
@@ -318,11 +320,13 @@ def _predict_labels_layoutlm(
     words = words[:LAYOUTLM_MAX_LEN]
     boxes = boxes[:LAYOUTLM_MAX_LEN]
 
-    # Buat encoding — tanpa gambar (images=None) karena kita pakai text-only mode
+    # Sediakan dummy image untuk menghindari error pada LayoutLMv3Processor
+    dummy_image = Image.new("RGB", (224, 224), (255, 255, 255))
+
     encoding = processor(
+        images       = dummy_image,
         text         = words,
         boxes        = boxes,
-        is_split_into_words = True,
         return_tensors      = "pt",
         truncation          = True,
         max_length          = LAYOUTLM_MAX_LEN,
@@ -626,10 +630,16 @@ def _rule_based_detect_tables(text: str, page_num: int = 1) -> List[TableSpan]:
 
     def _flush() -> None:
         nonlocal in_block, block_lines, block_start_char, consecutive_miss
-        useful = [l for l in block_lines if l.strip()]
+        # Potong baris miss di akhir jika ada
+        if consecutive_miss > 0 and len(block_lines) >= consecutive_miss:
+            table_lines = block_lines[:-consecutive_miss]
+        else:
+            table_lines = block_lines
+
+        useful = [l for l in table_lines if l.strip()]
         if len(useful) >= 3:
-            span_text = "\n".join(block_lines).strip()
-            end_char  = block_start_char + len(span_text)
+            span_text = "\n".join(table_lines).strip()
+            end_char  = block_start_char + sum(len(l) + 1 for l in table_lines)
             blocks.append(TableSpan(
                 start      = block_start_char,
                 end        = end_char,

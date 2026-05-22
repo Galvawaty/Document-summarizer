@@ -45,7 +45,7 @@ menggunakan IndoBERT NER + LayoutLMv3 Table Detection.
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE_MB", "20")) * 1024 * 1024
 
 # Allowed file types
-ALLOWED_EXTENSIONS = {".pdf"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 
 # Temp directory for uploaded files
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "doc-summarizer-uploads"
@@ -194,7 +194,7 @@ def _process_pdf(pdf_path: Path, include_raw: bool = False) -> Dict[str, Any]:
     Proses satu file PDF → NER → structured JSON.
     Reuse logic dari pipeline.py inference().
     """
-    from src.pdf_handler import extract_text_from_pdf, pages_to_full_text
+    from src.pdf_handler import extract_text_from_document, pages_to_full_text
     from src.inference import run_ner
     from src.postprocess import build_output_json
 
@@ -203,8 +203,8 @@ def _process_pdf(pdf_path: Path, include_raw: bool = False) -> Dict[str, Any]:
     # Ensure model loaded
     _ensure_model_loaded()
 
-    # Extract text
-    pages = extract_text_from_pdf(pdf_path)
+    # Extract text (PDF atau DOCX)
+    pages = extract_text_from_document(pdf_path)
     full_text = pages_to_full_text(pages)
 
     if not full_text.strip():
@@ -222,6 +222,7 @@ def _process_pdf(pdf_path: Path, include_raw: bool = False) -> Dict[str, Any]:
         pdf_path=str(pdf_path),
         pdf_type=pdf_type,
         page_count=len(pages),
+        raw_text=full_text,
     )
 
     elapsed = time.time() - start
@@ -255,6 +256,7 @@ def _process_text(text: str, include_raw: bool = False) -> Dict[str, Any]:
         pdf_path="",
         pdf_type="text_input",
         page_count=0,
+        raw_text=text,
     )
 
     elapsed = time.time() - start
@@ -284,7 +286,7 @@ async def root():
         "version": API_VERSION,
         "docs": "/docs",
         "endpoints": {
-            "POST /api/v1/summarize": "Upload PDF untuk diproses NER",
+            "POST /api/v1/summarize": "Upload PDF/DOCX untuk diproses NER",
             "POST /api/v1/summarize/text": "Kirim teks langsung untuk NER",
             "GET /api/v1/health": "Health check",
             "GET /api/v1/labels": "Daftar NER labels",
@@ -326,18 +328,19 @@ async def get_labels():
     tags=["NER"],
 )
 async def summarize_pdf(
-    file: UploadFile = File(..., description="File PDF yang akan diproses"),
+    file: UploadFile = File(..., description="File PDF atau DOCX yang akan diproses"),
     include_raw_entities: bool = Query(False, description="Sertakan entitas mentah"),
 ):
     """
-    Upload file PDF → ekstraksi teks → NER → ringkasan terstruktur.
+    Upload file PDF atau DOCX → ekstraksi teks → NER → ringkasan terstruktur.
 
     **Alur Pemrosesan:**
-    1. Upload file PDF
-    2. Ekstraksi teks (PyMuPDF untuk pure PDF, PaddleOCR untuk scanned)
-    3. NER menggunakan IndoBERT fine-tuned
-    4. Deteksi tabel menggunakan LayoutLMv3
-    5. Post-processing & generasi ringkasan
+    1. Upload file PDF atau DOCX
+    2. Ekstraksi teks (PyMuPDF/PaddleOCR untuk PDF, python-docx untuk DOCX)
+    3. Header/footer otomatis dihilangkan
+    4. NER menggunakan IndoBERT fine-tuned
+    5. Deteksi tabel menggunakan LayoutLMv3 (PDF) atau python-docx (DOCX)
+    6. Post-processing & generasi ringkasan
 
     **Response:** JSON terstruktur dengan ringkasan per-entitas dan paragraf narasi.
     """
@@ -373,8 +376,8 @@ async def summarize_pdf(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.exception(f"Error processing PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Gagal memproses PDF: {str(e)}")
+        logger.exception(f"Error processing document: {e}")
+        raise HTTPException(status_code=500, detail=f"Gagal memproses dokumen: {str(e)}")
     finally:
         # Cleanup temp file
         if temp_path.exists():
