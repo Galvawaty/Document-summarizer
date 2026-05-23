@@ -298,7 +298,7 @@ def extract_text_from_docx(docx_path: str | Path) -> List[PageText]:
     paragraphs: list[str] = []
     for para in doc.paragraphs:
         text = para.text.strip()
-        if text:
+        if text:sys
             paragraphs.append(text)
 
     # ── Ekstrak tabel ────────────────────────────────────────

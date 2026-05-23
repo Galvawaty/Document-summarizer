@@ -59,11 +59,13 @@ steps:
       - '3'
       - '--allow-unauthenticated'
       - '--set-env-vars'
-      - 'PRELOAD_MODEL=1,MAX_FILE_SIZE_MB=20'
+      - 'PRELOAD_MODEL=1,MAX_FILE_SIZE_MB=20,CONVEX_URL=${_CONVEX_URL},CONVEX_AUTH_KEY=${_CONVEX_AUTH_KEY}'
 
 # Substitution variables (bisa di-override)
 substitutions:
   _REGION: 'asia-southeast2'  # Jakarta
+  _CONVEX_URL: 'https://your-project.convex.cloud'  # Ganti dengan URL Convex project
+  _CONVEX_AUTH_KEY: ''  # Isi dengan Convex deploy key via --substitutions atau Secret Manager
 
 # Image yang akan disimpan di Container Registry
 images:

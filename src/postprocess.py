@@ -238,6 +238,54 @@ def compute_completeness(entities: Dict[str, Any]) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────
 # Paragraph Summary Generator
 # ─────────────────────────────────────────────────────────────
+def generate_page_summary(
+    page_entities: Dict[str, Any],
+    page_number: int,
+    filename: str = "",
+) -> str:
+    """
+    Buat ringkasan SATU halaman dalam 1 paragraf narasi Bahasa Indonesia
+    berdasarkan entitas yang ditemukan di halaman tersebut.
+
+    Args:
+        page_entities : Dict hasil NER untuk halaman ini.
+        page_number   : Nomor halaman.
+        filename      : Nama file sumber (opsional).
+
+    Returns:
+        String 1 paragraf ringkasan halaman.
+    """
+    return generate_paragraph_summary(page_entities, filename=filename)
+
+
+def generate_per_page_summaries(
+    pages_text_with_entities: List[Dict[str, Any]],
+    filename: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Buat ringkasan per halaman dari daftar halaman + entitas masing-masing.
+
+    Args:
+        pages_text_with_entities: List dari dict per halaman:
+            [{"page": 1, "text": "...", "entities": {...}}, ...]
+        filename: Nama file sumber (opsional).
+
+    Returns:
+        List[Dict]: [{"page": 1, "entities": {...}, "summary": "..."}, ...]
+    """
+    results = []
+    for item in pages_text_with_entities:
+        page_num = item.get("page", 0)
+        entities = item.get("entities", {})
+        summary = generate_page_summary(entities, page_num, filename=filename)
+        results.append({
+            "page": page_num,
+            "entities": entities,
+            "summary": summary,
+        })
+    return results
+
+
 def generate_paragraph_summary(
     entities: Dict[str, Any],
     filename: str = "",

@@ -20,11 +20,13 @@ import os
 import time
 import tempfile
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+import httpx
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -106,6 +108,7 @@ class SummarizeResponse(BaseModel):
     metadata: MetadataResponse
     ringkasan: RingkasanResponse
     paragraph_summary: str
+    per_page_summaries: List[PerPageSummary]
     entities_raw: Optional[Dict[str, Any]] = None
 
 
@@ -122,6 +125,43 @@ class ErrorResponse(BaseModel):
     success: bool = False
     error: str
     detail: Optional[str] = None
+
+
+class PerPageEntity(BaseModel):
+    """Entitas per halaman."""
+    NOMOR_SURAT: Optional[str] = None
+    JENIS_DOKUMEN: Optional[str] = None
+    TANGGAL: Optional[str] = None
+    PENGIRIM: Optional[str] = None
+    PENERIMA: Optional[str] = None
+    PERIHAL: Optional[str] = None
+    ISI: Optional[str] = None
+    TABEL: Optional[Any] = None
+    LOKASI: Optional[str] = None
+    WAKTU: Optional[str] = None
+
+
+class PerPageSummary(BaseModel):
+    """Ringkasan satu halaman."""
+    page: int
+    entities: PerPageEntity
+    summary: str
+
+
+class AsyncSummarizeRequest(BaseModel):
+    """Request body untuk endpoint /summarize/async."""
+    file_url: str = Field(..., description="URL file dari Convex storage")
+    callback_url: str = Field(..., description="URL Convex HTTP action untuk callback hasil")
+    filename: Optional[str] = Field(None, description="Nama file asli")
+    include_raw_entities: bool = Field(False, description="Sertakan entitas mentah dalam callback")
+
+
+class AsyncSummarizeResponse(BaseModel):
+    """Respons langsung dari endpoint async."""
+    success: bool = True
+    job_id: str
+    status: str
+    message: str
 
 
 # ─────────────────────────────────────────────────────────────
@@ -187,56 +227,20 @@ app.add_middleware(
 
 
 # ─────────────────────────────────────────────────────────────
-# Helper: proses PDF → structured JSON
+# Helper: proses PDF → structured JSON (with per-page summaries)
 # ─────────────────────────────────────────────────────────────
 def _process_pdf(pdf_path: Path, include_raw: bool = False) -> Dict[str, Any]:
     """
-    Proses satu file PDF → NER → structured JSON.
-    Reuse logic dari pipeline.py inference().
+    Proses satu file PDF → document-level NER + per-page NER → structured JSON.
     """
-    from src.pdf_handler import extract_text_from_document, pages_to_full_text
-    from src.inference import run_ner
-    from src.postprocess import build_output_json
-
     start = time.time()
 
-    # Ensure model loaded
-    _ensure_model_loaded()
-
-    # Extract text (PDF atau DOCX)
-    pages = extract_text_from_document(pdf_path)
-    full_text = pages_to_full_text(pages)
-
-    if not full_text.strip():
-        raise ValueError("Tidak ada teks yang dapat diekstrak dari PDF.")
-
-    # Run NER
-    entities = run_ner(full_text, pdf_path=str(pdf_path))
-
-    # Determine PDF type
-    pdf_type = "pure" if len(full_text) > 50 else "scanned"
-
-    # Build structured output
-    structured = build_output_json(
-        raw_entities=entities,
-        pdf_path=str(pdf_path),
-        pdf_type=pdf_type,
-        page_count=len(pages),
-        raw_text=full_text,
-    )
+    structured = _process_pdf_with_per_page(pdf_path)
 
     elapsed = time.time() - start
     structured["metadata"]["waktu_proses_detik"] = round(elapsed, 3)
 
-    result = {
-        "success": True,
-        "metadata": structured["metadata"],
-        "ringkasan": structured["ringkasan"],
-        "paragraph_summary": structured.get("paragraph_summary", ""),
-    }
-
-    if include_raw:
-        result["entities_raw"] = entities
+    result = _result_to_response(structured, include_raw=include_raw, raw_entities=structured.get("ringkasan", {}))
 
     return result
 
@@ -267,12 +271,155 @@ def _process_text(text: str, include_raw: bool = False) -> Dict[str, Any]:
         "metadata": structured["metadata"],
         "ringkasan": structured["ringkasan"],
         "paragraph_summary": structured.get("paragraph_summary", ""),
+        "per_page_summaries": [],
     }
 
     if include_raw:
         result["entities_raw"] = entities
 
     return result
+
+
+def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
+    """
+    Proses satu file PDF → per-page NER + document-level NER → structured JSON.
+
+    Returns:
+        Dict dengan 'per_page_summaries' yang berisi entities + summary per halaman.
+    """
+    from src.pdf_handler import extract_text_from_document, pages_to_full_text
+    from src.inference import run_ner
+    from src.postprocess import build_output_json, generate_paragraph_summary
+
+    _ensure_model_loaded()
+
+    pages = extract_text_from_document(pdf_path)
+    full_text = pages_to_full_text(pages)
+
+    if not full_text.strip():
+        raise ValueError("Tidak ada teks yang dapat diekstrak dari PDF.")
+
+    pdf_type = "pure" if len(full_text) > 50 else "scanned"
+
+    # Document-level NER
+    doc_entities = run_ner(full_text, pdf_path=str(pdf_path))
+
+    # Per-page NER
+    per_page_results = []
+    for page in pages:
+        page_text = page.text.strip()
+        if page_text:
+            page_entities = run_ner(page_text)
+            page_summary = generate_paragraph_summary(
+                page_entities, filename=f"{Path(pdf_path).name} halaman {page.page_number}"
+            )
+        else:
+            page_entities = {}
+            page_summary = f"Halaman {page.page_number} tidak mengandung teks."
+
+        per_page_results.append({
+            "page": page.page_number,
+            "entities": page_entities,
+            "summary": page_summary,
+        })
+
+    # Build structured output (document-level)
+    structured = build_output_json(
+        raw_entities=doc_entities,
+        pdf_path=str(pdf_path),
+        pdf_type=pdf_type,
+        page_count=len(pages),
+        raw_text=full_text,
+    )
+
+    # Add per-page summaries
+    ringkasan_keys = [
+        "NOMOR_SURAT", "JENIS_DOKUMEN", "TANGGAL", "PENGIRIM",
+        "PENERIMA", "PERIHAL", "ISI", "TABEL", "LOKASI", "WAKTU",
+    ]
+    per_page_clean = []
+    for r in per_page_results:
+        entities_clean = {k: r["entities"].get(k) for k in ringkasan_keys}
+        per_page_clean.append({
+            "page": r["page"],
+            "entities": entities_clean,
+            "summary": r["summary"],
+        })
+    structured["per_page_summaries"] = per_page_clean
+
+    return structured
+
+
+def _result_to_response(structured: Dict, include_raw: bool = False, raw_entities: Optional[Dict] = None) -> Dict:
+    """Helper untuk konversi structured output ke response dict."""
+    result = {
+        "success": True,
+        "metadata": structured["metadata"],
+        "ringkasan": structured["ringkasan"],
+        "paragraph_summary": structured.get("paragraph_summary", ""),
+        "per_page_summaries": structured.get("per_page_summaries", []),
+    }
+    if include_raw and raw_entities:
+        result["entities_raw"] = raw_entities
+    return result
+
+
+async def _background_process_and_callback(
+    file_url: str,
+    callback_url: str,
+    job_id: str,
+    filename: Optional[str] = None,
+    include_raw: bool = False,
+):
+    """
+    Download file dari Convex storage, proses, lalu POST hasil ke callback_url.
+    """
+    temp_path = None
+    try:
+        # Download file
+        logger.info(f"[{job_id}] Downloading file: {file_url}")
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.get(file_url)
+            resp.raise_for_status()
+
+        ext = Path(filename or "document.pdf").suffix.lower() or ".pdf"
+        temp_path = UPLOAD_DIR / f"async_{job_id}{ext}"
+        temp_path.write_bytes(resp.content)
+        logger.info(f"[{job_id}] Downloaded {len(resp.content)} bytes → {temp_path}")
+
+        # Process document
+        structured = _process_pdf_with_per_page(temp_path)
+        raw_entities = structured.get("ringkasan", {})
+
+        # Build callback payload
+        payload = {
+            "success": True,
+            "job_id": job_id,
+            "status": "completed",
+            "result": _result_to_response(structured, include_raw=include_raw, raw_entities=raw_entities),
+        }
+
+        logger.info(f"[{job_id}] Processing complete, sending callback to {callback_url}")
+
+    except Exception as e:
+        logger.exception(f"[{job_id}] Processing failed: {e}")
+        payload = {
+            "success": False,
+            "job_id": job_id,
+            "status": "error",
+            "error": str(e),
+        }
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
+
+    # Send callback
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(callback_url, json=payload)
+        logger.info(f"[{job_id}] Callback sent successfully")
+    except Exception as e:
+        logger.error(f"[{job_id}] Failed to send callback: {e}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -286,8 +433,9 @@ async def root():
         "version": API_VERSION,
         "docs": "/docs",
         "endpoints": {
-            "POST /api/v1/summarize": "Upload PDF/DOCX untuk diproses NER",
+            "POST /api/v1/summarize": "Upload PDF/DOCX untuk diproses NER (synchronous)",
             "POST /api/v1/summarize/text": "Kirim teks langsung untuk NER",
+            "POST /api/v1/summarize/async": "Upload via URL → proses async → callback ke Convex",
             "GET /api/v1/health": "Health check",
             "GET /api/v1/labels": "Daftar NER labels",
         },
@@ -406,6 +554,80 @@ async def summarize_text(request: TextRequest):
     except Exception as e:
         logger.exception(f"Error processing text: {e}")
         raise HTTPException(status_code=500, detail=f"Gagal memproses teks: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Async Endpoint — Callback to Convex
+# ─────────────────────────────────────────────────────────────
+CONVEX_AUTH_KEY = os.getenv("CONVEX_AUTH_KEY", "")
+
+
+@app.post(
+    "/api/v1/summarize/async",
+    response_model=AsyncSummarizeResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+    tags=["NER"],
+)
+async def summarize_async(
+    request: AsyncSummarizeRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Upload dokumen via URL (Convex storage) → proses async → callback ke Convex.
+
+    **Alur:**
+    1. Frontend upload file ke Convex File Storage
+    2. Frontend kirim `file_url` + `callback_url` ke endpoint ini
+    3. API langsung return `job_id` dengan status `queued`
+    4. Background task download file dari Convex → proses NER per halaman
+    5. Setelah selesai, POST hasil ke `callback_url` (Convex HTTP Action)
+    6. Frontend polling Convex query untuk melihat hasil
+
+    **Request:**
+    ```json
+    {
+      "file_url": "https://....convex.cloud/api/storage/...",
+      "callback_url": "https://....convex.cloud/api/http/callback-document-summarizer",
+      "filename": "surat_keterangan.pdf",
+      "include_raw_entities": false
+    }
+    ```
+    """
+    if not request.file_url:
+        raise HTTPException(status_code=400, detail="file_url wajib diisi")
+
+    if not request.callback_url:
+        raise HTTPException(status_code=400, detail="callback_url wajib diisi")
+
+    # Validate URL format
+    if not request.file_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="file_url harus berupa URL yang valid")
+
+    if not request.callback_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="callback_url harus berupa URL yang valid")
+
+    job_id = str(uuid.uuid4())
+    logger.info(f"[{job_id}] New async job: file_url={request.file_url}, callback={request.callback_url}")
+
+    # Add background task
+    background_tasks.add_task(
+        _background_process_and_callback,
+        file_url=request.file_url,
+        callback_url=request.callback_url,
+        job_id=job_id,
+        filename=request.filename,
+        include_raw=request.include_raw_entities,
+    )
+
+    return AsyncSummarizeResponse(
+        success=True,
+        job_id=job_id,
+        status="queued",
+        message=f"Job {job_id} telah diantri. Hasil akan dikirim ke callback_url.",
+    )
 
 
 # ─────────────────────────────────────────────────────────────
