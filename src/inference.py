@@ -295,56 +295,80 @@ def _extract_fallback_perihal(text: str) -> Optional[str]:
 
 def _extract_isi_from_text(text: str, max_chars: int = 800) -> Optional[str]:
     """
-    Ekstrak isi utama dokumen secara rule-based.
-    Cari paragraf setelah baris 'Perihal' atau setelah pembuka surat,
-    kecualikan baris header/metadata.
+    Ekstrak isi utama dokumen dengan pendekatan body-finder.
+    Cari baris pertama yang mengandung kata pembuka isi surat
+    (Kami menginformasikan, Bersama ini, Sehubungan dengan, dll.),
+    lalu kumpulkan dari baris tersebut sampai max_chars.
     """
-    # Hapus kop surat terlebih dahulu agar tidak masuk ke ISI
+    # Hapus marker [Halaman N] yang ditambahkan oleh pages_to_full_text()
+    text = re.sub(r'\[Halaman \d+\]\s*', '', text)
     text = _strip_kop_surat(text)
-    lines = text.split("\n")
 
-    # Temukan posisi setelah baris 'Perihal'
-    perihal_idx = -1
-    for i, line in enumerate(lines):
-        if re.search(r'(?:perihal|hal|topik|subject)\s*:', line, re.IGNORECASE):
-            perihal_idx = i
-            break
+    # Split jadi paragraf
+    raw_paras = re.split(r'\n\s*\n', text)
+    paras = [p.strip() for p in raw_paras if p.strip()]
 
-    start_idx = perihal_idx + 1 if perihal_idx >= 0 else 0
-
-    # Pola kata pembuka surat umum
-    _OPENING_WORDS = re.compile(
-        r'^(?:dengan\s+hormat|bersama\s+ini|sehubungan\s+dengan|'
-        r'menindaklanjuti|berkenaan\s+dengan|dalam\s+rangka|'
-        r'berdasarkan|yang\s+bertanda\s+tangan|menerangkan\s+bahwa|'
-        r'sesuai\s+dengan|diberitahukan\s+bahwa)',
+    # Pola kalimat pembuka isi surat
+    _BODY_OPENER = re.compile(
+        r'^(?:'
+        r'kami\s+(?:menginformasikan|memberitahukan|sampaikan|ajak|undang|selenggarakan)|'
+        r'bersama\s+ini|sehubungan\s+dengan|menindaklanjuti|'
+        r'berkenaan\s+dengan|dalam\s+rangka|berdasarkan|'
+        r'yang\s+bertanda\s+tangan|menerangkan\s+bahwa|'
+        r'sesuai\s+dengan|diberitahukan\s+bahwa|'
+        r'dengan\s+ini\s+(?:kami|memberitahukan|mengumumkan)|'
+        r'melalui\s+surat\s+ini|'
+        r'IC2IE\s+merupakan'  # kadang body langsung ke topik
+        r')',
         re.IGNORECASE,
     )
 
-    paragraphs = []
-    for line in lines[start_idx:]:
-        stripped = line.strip()
+    # Pola paragraf yang harus dilewati (metadata, penerima, pembuka)
+    _SKIP_PARA = re.compile(
+        r'^\s*(?:'
+        r'nomor\s*:|nip\s*:|kepada\s*|yth\.?\s*|dari\s*:|'
+        r'perihal\s*:|hal\s*:|tanggal\s*:|lampiran\s*:|'
+        r'dengan\s+hormat|assalamu|salam\s+sejahtera|'
+        r'tembusan\s*:|cc\s*:|'
+        r'[=\-_]{3,}'
+        r')',
+        re.IGNORECASE,
+    )
+
+    collected = []
+    found_body = False
+
+    for para in paras:
+        stripped = para.strip()
         if not stripped:
             continue
-        # Lewati baris metadata/header
-        if re.match(
-            r'^(nomor|nip|kepada|dari|perihal|hal|tanggal|lampiran)\s*:',
-            stripped, re.IGNORECASE
-        ):
-            continue
-        # Ambil baris yang merupakan paragraf isi
-        if len(stripped) > 20 or _OPENING_WORDS.match(stripped):
-            paragraphs.append(stripped)
-        if sum(len(p) for p in paragraphs) >= max_chars:
+
+        if not found_body:
+            # Cek apakah ini baris tanggal/metadata (angka + kata singkat)
+            if re.match(r'^\d+\s+\w+\s+\d{4}$', stripped):
+                continue
+            if _SKIP_PARA.match(stripped):
+                continue
+            if len(stripped) < 50:
+                continue
+            # Cari pembuka isi surat
+            if _BODY_OPENER.search(stripped):
+                found_body = True
+            else:
+                continue
+
+        collected.append(stripped)
+
+        total = sum(len(p) for p in collected)
+        if total >= max_chars:
             break
 
-    if not paragraphs:
+    if not collected:
         return None
 
-    isi = " ".join(paragraphs)
+    isi = " ".join(collected)
     isi = re.sub(r'\s+', ' ', isi).strip()
 
-    # Syarat berhenti apabila kalimat sudah selesai dan berakhiran dengan (.)
     if len(isi) > max_chars:
         truncated = isi[:max_chars]
         last_period = truncated.rfind('.')

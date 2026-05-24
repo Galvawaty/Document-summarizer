@@ -144,8 +144,10 @@ class PerPageEntity(BaseModel):
 class PerPageSummary(BaseModel):
     """Ringkasan satu halaman."""
     page: int
-    entities: PerPageEntity
+    page_type: str = "surat"
+    entities: Optional[PerPageEntity] = None
     summary: str
+    structured_content: Optional[Dict[str, Any]] = None
 
 
 class AsyncSummarizeRequest(BaseModel):
@@ -284,12 +286,27 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
     """
     Proses satu file PDF → per-page NER + document-level NER → structured JSON.
 
+    Alur per halaman:
+      1. Klasifikasi tipe halaman (surat/jadwal/tabel/lainnya)
+      2. Process sesuai tipe:
+         - surat   → NER per halaman + borrow field global dari doc_entities
+         - jadwal  → parse jadwal
+         - tabel   → parse tabel (max 3 kolom)
+         - lainnya → summary singkat
+
     Returns:
         Dict dengan 'per_page_summaries' yang berisi entities + summary per halaman.
     """
     from src.pdf_handler import extract_text_from_document, pages_to_full_text
     from src.inference import run_ner
-    from src.postprocess import build_output_json, generate_paragraph_summary
+    from src.postprocess import build_output_json, generate_paragraph_summary, is_valid_nomor_surat
+    from src.page_classifier import classify_page
+    from src.page_parser import (
+        parse_schedule,
+        generate_schedule_summary,
+        parse_table,
+        generate_table_summary,
+    )
 
     _ensure_model_loaded()
 
@@ -304,24 +321,78 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
     # Document-level NER
     doc_entities = run_ner(full_text, pdf_path=str(pdf_path))
 
-    # Per-page NER
+    # Fields global yang di-borrow dari document-level ke per-page
+    _GLOBAL_FIELDS = [
+        "NOMOR_SURAT", "JENIS_DOKUMEN", "TANGGAL",
+        "PENGIRIM", "PENERIMA", "PERIHAL", "LOKASI", "WAKTU",
+    ]
+    _ALL_FIELDS = _GLOBAL_FIELDS + ["ISI", "TABEL"]
+
+    # Per-page processing
     per_page_results = []
     for page in pages:
         page_text = page.text.strip()
-        if page_text:
-            page_entities = run_ner(page_text)
-            page_summary = generate_paragraph_summary(
-                page_entities, filename=f"{Path(pdf_path).name} halaman {page.page_number}"
-            )
-        else:
-            page_entities = {}
-            page_summary = f"Halaman {page.page_number} tidak mengandung teks."
+        page_num = page.page_number
 
-        per_page_results.append({
-            "page": page.page_number,
-            "entities": page_entities,
-            "summary": page_summary,
-        })
+        if not page_text:
+            per_page_results.append({
+                "page": page_num,
+                "page_type": "lainnya",
+                "entities": {},
+                "summary": f"Halaman {page_num} tidak mengandung teks.",
+                "structured_content": None,
+            })
+            continue
+
+        page_type = classify_page(page_text)
+
+        if page_type == "jadwal":
+            items = parse_schedule(page_text)
+            summary = generate_schedule_summary(page_num, items)
+            per_page_results.append({
+                "page": page_num,
+                "page_type": "jadwal",
+                "entities": {},
+                "summary": summary,
+                "structured_content": {"type": "schedule", "items": items},
+            })
+
+        elif page_type == "tabel":
+            table_data = parse_table(page_text, max_cols=3)
+            summary = generate_table_summary(page_num, table_data)
+            per_page_results.append({
+                "page": page_num,
+                "page_type": "tabel",
+                "entities": {},
+                "summary": summary,
+                "structured_content": table_data,
+            })
+
+        else:
+            # Run NER untuk halaman surat/lainnya
+            page_entities = run_ner(page_text)
+
+            # Borrow global fields dari document-level untuk konsistensi
+            for field in _GLOBAL_FIELDS:
+                doc_val = doc_entities.get(field)
+                if doc_val:
+                    # Untuk NOMOR_SURAT, validasi dulu
+                    if field == "NOMOR_SURAT" and is_valid_nomor_surat(doc_val):
+                        page_entities[field] = doc_val
+                    elif field != "NOMOR_SURAT":
+                        page_entities[field] = doc_val
+
+            page_summary = generate_paragraph_summary(
+                page_entities,
+                filename=f"{Path(pdf_path).name} halaman {page_num}",
+            )
+            per_page_results.append({
+                "page": page_num,
+                "page_type": page_type,
+                "entities": page_entities,
+                "summary": page_summary,
+                "structured_content": None,
+            })
 
     # Build structured output (document-level)
     structured = build_output_json(
@@ -332,18 +403,17 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
         raw_text=full_text,
     )
 
-    # Add per-page summaries
-    ringkasan_keys = [
-        "NOMOR_SURAT", "JENIS_DOKUMEN", "TANGGAL", "PENGIRIM",
-        "PENERIMA", "PERIHAL", "ISI", "TABEL", "LOKASI", "WAKTU",
-    ]
+    # Clean per-page entities to match standard keys
     per_page_clean = []
     for r in per_page_results:
-        entities_clean = {k: r["entities"].get(k) for k in ringkasan_keys}
+        entities_raw = r.get("entities") or {}
+        entities_clean = {k: entities_raw.get(k) for k in _ALL_FIELDS}
         per_page_clean.append({
             "page": r["page"],
+            "page_type": r["page_type"],
             "entities": entities_clean,
             "summary": r["summary"],
+            "structured_content": r.get("structured_content"),
         })
     structured["per_page_summaries"] = per_page_clean
 

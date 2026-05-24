@@ -22,8 +22,8 @@ from loguru import logger
 
 # Regex patterns for extraction
 _EXTRACT_NOMOR_SURAT_PATTERN = re.compile(
-    r"(?:(?:No\.?|Nomor)\s*(?:Surat)?\s*[:\-]?\s*)?"
-    r"(\d+\s*/\s*[A-Z0-9.\-]+(?:\s*/\s*[A-Z0-9.\-]+)+\s*/\s*\d{4})",
+    r"(?:(?:No\.?|Nomor|NOMOR|NO)\s*(?:Surat)?\s*[:\-]?\s*)?"
+    r"(\d+\s*/\s*[A-Z0-9.\-_]+(?:\s*/\s*[A-Z0-9.\-_]+)*\s*/\s*\d{4})",
     re.IGNORECASE,
 )
 _TANGGAL_PATTERN = re.compile(r"(Depok,?\s*)?(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", re.IGNORECASE)
@@ -148,7 +148,30 @@ def is_valid_nomor_surat(val: Any) -> bool:
     if isinstance(val, list):
         return any(is_valid_nomor_surat(v) for v in val)
     val_str = str(val).strip()
+    if "://" in val_str or val_str.startswith("http"):
+        return False
     if "/" in val_str and any(c.isdigit() for c in val_str) and len(val_str) > 5:
+        return True
+    return False
+
+
+def _is_header_footer_noise(val: str) -> bool:
+    """Cek apakah nilai terindikasi sebagai header/footer (bukan konten dokumen)."""
+    lower = val.lower().strip()
+    # URL / alamat web
+    if "://" in lower or lower.startswith("http"):
+        return True
+    # Laman, Website, Posel, Email, Telepon
+    if re.match(r'^\s*(?:laman|website|web|posel|email|e-?mail|telepon|telp|fax)\s*[:\(]?', lower):
+        return True
+    # [Halaman N]
+    if re.match(r'\[?\s*halaman\s+\d+', lower):
+        return True
+    # Nomor telepon (021...) atau dimulai dengan angka
+    if re.match(r'^\(?\d{3,4}\)?\s*\d{5,}', val.strip()):
+        return True
+    # Alamat email
+    if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', lower):
         return True
     return False
 
@@ -158,8 +181,12 @@ def is_valid_jenis_dokumen(val: Any) -> bool:
     if not val:
         return False
     if isinstance(val, list):
-        return any(is_valid_jenis_dokumen(v) for v in val)
+        # Jika list, validasi tiap item dan hanya terima jika setidaknya satu valid
+        valid_items = [v for v in val if is_valid_jenis_dokumen(v)]
+        return len(valid_items) > 0
     val_str = str(val).strip()
+    if _is_header_footer_noise(val_str):
+        return False
     cleaned = re.sub(r'[^\w\s]', '', val_str).strip()
     if len(cleaned) < 3:
         return False
@@ -167,7 +194,10 @@ def is_valid_jenis_dokumen(val: Any) -> bool:
         return False
     if not any(c.isalpha() for c in cleaned):
         return False
-    if cleaned.lower() in ("halaman", "hal"):
+    if cleaned.lower().strip() in ("halaman", "hal"):
+        return False
+    # Reject pure date strings (DD Month YYYY)
+    if re.match(r'^\d{1,2}\s+\w+\s+\d{4}$', cleaned):
         return False
     return True
 
@@ -359,23 +389,17 @@ def generate_paragraph_summary(
 
     # — Sinopsis isi dokumen ————————————————————————
     if isi:
-        if len(isi) > 200:
-            truncated = isi[:200]
-            last_period = truncated.rfind('.')
-            if last_period != -1:
-                isi_short = truncated[:last_period + 1].strip()
-            else:
-                isi_short = truncated.rstrip() + "..."
+        isi_clean = re.sub(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffd]', '', isi)
+        isi_clean = re.sub(r'^\?{2,}|^[?\s]+', '', isi_clean).strip()
+        first_period = isi_clean.find('.')
+        if first_period != -1:
+            isi_short = isi_clean[:first_period + 1].strip()
         else:
-            if not isi.endswith('.'):
-                last_period = isi.rfind('.')
-                if last_period != -1:
-                    isi_short = isi[:last_period + 1].strip()
-                else:
-                    isi_short = isi
-            else:
-                isi_short = isi
-        parts.append(f"Isi dokumen menyatakan: \u201c{isi_short}\u201d")
+            isi_short = isi_clean[:200].strip()
+            if len(isi_clean) > 200:
+                isi_short += "..."
+        if isi_short:
+            parts.append(f"Isi dokumen menyatakan: \u201c{isi_short}\u201d")
 
     # — Info tabel (dari LayoutLMv3) ———————————————————
     tabel_raw = entities.get("TABEL")
@@ -394,14 +418,18 @@ def generate_paragraph_summary(
         else:
             parts.append("Dokumen ini mengandung tabel data yang dideteksi oleh LayoutLMv3")
 
-    # Gabungkan dengan koma + titik
+    # Gabungkan jadi max 6 kalimat
     if not parts:
         name = filename or "dokumen"
         return f"Dokumen '{name}' berhasil diproses namun tidak ada entitas yang ditemukan."
 
-    sentence = ", ".join(parts) + "."
-    sentence = sentence[0].upper() + sentence[1:]
-    return sentence
+    sentences = []
+    for part in parts:
+        s = part[0].upper() + part[1:] + "."
+        sentences.append(s)
+
+    sentences = sentences[:6]
+    return " ".join(sentences)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -483,6 +511,15 @@ def build_output_json(
             fallback_perihal = _extract_fallback_perihal(raw_text)
         if fallback_perihal:
             normalized["PERIHAL"] = fallback_perihal
+
+    # Filter header/footer noise dari PENGIRIM, ambil yang terakhir (signature block)
+    pengirim = normalized.get("PENGIRIM")
+    if pengirim:
+        if isinstance(pengirim, list):
+            filtered = [v for v in pengirim if not _is_header_footer_noise(v)]
+            normalized["PENGIRIM"] = filtered[-1] if filtered else None
+        elif _is_header_footer_noise(str(pengirim)):
+            normalized["PENGIRIM"] = None
 
     completeness = compute_completeness(normalized)
     filename     = Path(pdf_path).name if pdf_path else ""
