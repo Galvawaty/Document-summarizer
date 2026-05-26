@@ -308,12 +308,15 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
     full_text = pages_to_full_text(pages)
 
     if not full_text.strip():
-        raise ValueError("Tidak ada teks yang dapat diekstrak dari PDF.")
+        raise ValueError("Tidak ada teks yang dapat diekstrak dari dokumen.")
 
     pdf_type = "pure" if len(full_text) > 50 else "scanned"
 
-    # Document-level NER
-    doc_entities = run_ner(full_text, pdf_path=str(pdf_path))
+    # Document-level NER — gunakan teks tanpa [Halaman N] prefix
+    # agar NER model tidak terkecoh dengan header buatan
+    ner_text = "\n\n".join(p.text for p in pages if p.text.strip())
+    ner_pdf_path = str(pdf_path) if pdf_path.suffix.lower() == ".pdf" else None
+    doc_entities = run_ner(ner_text, pdf_path=ner_pdf_path)
 
     # Fields global yang di-borrow dari document-level ke per-page
     _GLOBAL_FIELDS = [

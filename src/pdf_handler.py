@@ -210,7 +210,17 @@ def extract_scanned_pdf(
         img_array = _pil_to_numpy(img)
 
         # Jalankan OCR
-        ocr_result = ocr.ocr(img_array, cls=True)
+        try:
+            ocr_result = ocr.ocr(img_array, cls=True)
+        except Exception as e:
+            logger.error(f"  [OCR] Gagal OCR hal. {page_num}: {e}")
+            results.append(PageText(
+                page_number=page_num,
+                text="",
+                source="ocr",
+                confidence=0.0,
+            ))
+            continue
 
         page_text, confidences = _parse_paddle_result(ocr_result)
         avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
@@ -319,12 +329,47 @@ def extract_text_from_docx(docx_path: str | Path) -> List[PageText]:
                 f"[Tabel {table_idx + 1}]\n" + "\n".join(rows_text)
             )
 
-    # ── Gabungkan paragraf dan tabel ─────────────────────────
-    body_text = "\n".join(paragraphs)
+    # ── Ekstrak text boxes (txbxContent) ─────────────────────
+    # Text boxes di Word menyimpan konten terpisah dari body
+    # paragraphs, sehingga perlu diekstrak manual dari XML.
+    import xml.etree.ElementTree as ET
+    W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    txbx_texts: list[str] = []
+    for txbx_content in doc.element.body.iter(f'{{{W_NS}}}txbxContent'):
+        lines: list[str] = []
+        for p in txbx_content.iter(f'{{{W_NS}}}p'):
+            p_text = ''.join(t.text or '' for t in p.iter(f'{{{W_NS}}}t'))
+            if p_text.strip():
+                lines.append(p_text.strip())
+        if lines:
+            txbx_texts.append('\n'.join(lines))
+
+    # ── Gabungkan konten ─────────────────────────────────────
+    # Gabungkan body paragraphs dan text boxes.
+    # Deduplikasi per baris untuk menghindari konten ganda.
+    seen_lines: set[str] = set()
+    merged_lines: list[str] = []
+    for src in [txbx_texts, paragraphs]:
+        for line in '\n'.join(src).split('\n'):
+            line_stripped = line.strip()
+            if line_stripped and line_stripped not in seen_lines:
+                seen_lines.add(line_stripped)
+                merged_lines.append(line_stripped)
+    main_text = '\n'.join(merged_lines)
     if table_texts:
-        body_text += "\n\n[KONTEKS TABEL]\n" + "\n\n".join(table_texts)
+        main_text += '\n\n[KONTEKS TABEL]\n' + '\n\n'.join(table_texts)
+
+    body_text = main_text
 
     cleaned = _clean_text(body_text)
+
+    # Jika DOCX tidak punya teks, coba ekstrak gambar dan OCR
+    if not cleaned and _PADDLEOCR_AVAILABLE:
+        logger.info("  DOCX tidak memiliki teks → mencoba OCR dari gambar embedded...")
+        ocr_pages = _extract_docx_images_ocr(docx_path, doc)
+        if ocr_pages:
+            logger.info(f"  ✓ OCR dari gambar DOCX: {len(ocr_pages[0].text)} karakter")
+            return ocr_pages
 
     result = [
         PageText(
@@ -336,9 +381,94 @@ def extract_text_from_docx(docx_path: str | Path) -> List[PageText]:
     ]
 
     logger.info(f"  ✓ DOCX berhasil dibaca: {len(cleaned)} karakter, "
-                f"{len(paragraphs)} paragraf, {len(doc.tables)} tabel")
+                f"{len(paragraphs)} paragraf, {len(doc.tables)} tabel, "
+                f"{len(txbx_texts)} text boxes")
 
     return result
+
+
+# ─────────────────────────────────────────────────────────────
+# DOCX OCR fallback — ekstrak gambar dari DOCX, lalu PaddleOCR
+# ─────────────────────────────────────────────────────────────
+def _extract_docx_images_ocr(docx_path: Path, doc: "DocxDocument") -> List[PageText]:
+    """
+    Ekstrak gambar dari DOCX (zip container) dan jalankan OCR.
+    Fallback untuk DOCX hasil scan yang tidak punya teks selectable.
+
+    DOCX adalah ZIP berisi folder word/media/ dengan file gambar.
+    """
+    import zipfile
+
+    if not _PADDLEOCR_AVAILABLE or not _PIL_AVAILABLE:
+        return []
+
+    from PIL import Image as PILImage
+
+    ocr = _get_ocr()
+    image_exts = {'.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif'}
+    pages: List[PageText] = []
+    page_num = 0
+
+    try:
+        with zipfile.ZipFile(docx_path, 'r') as zf:
+            # Cari semua file gambar di word/media/
+            media_files = [
+                f for f in zf.namelist()
+                if f.startswith('word/media/') and Path(f).suffix.lower() in image_exts
+            ]
+            media_files.sort()
+
+            if not media_files:
+                logger.warning("  [DOCX OCR] Tidak ada gambar ditemukan di word/media/")
+                return []
+
+            logger.info(f"  [DOCX OCR] Menemukan {len(media_files)} gambar, menjalankan OCR...")
+
+            for img_path in media_files:
+                page_num += 1
+                try:
+                    with zf.open(img_path) as f:
+                        img = PILImage.open(f).convert("RGB")
+
+                    # Resize jika terlalu besar
+                    max_size = 4096
+                    if max(img.size) > max_size:
+                        ratio = max_size / max(img.size)
+                        new_size = (int(img.width * ratio), int(img.height * ratio))
+                        img = img.resize(new_size, PILImage.LANCZOS)
+
+                    import numpy as np
+                    img_array = np.array(img)
+                    ocr_result = ocr.ocr(img_array, cls=True)
+
+                    page_text, confidences = _parse_paddle_result(ocr_result)
+                    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+
+                    pages.append(PageText(
+                        page_number=page_num,
+                        text=_clean_text(page_text),
+                        source="ocr",
+                        confidence=avg_conf,
+                    ))
+                    logger.debug(
+                        f"  [DOCX OCR] Gambar {page_num}: {len(page_text)} karakter, "
+                        f"conf={avg_conf:.3f}"
+                    )
+                except Exception as e:
+                    logger.warning(f"  [DOCX OCR] Gagal OCR gambar {img_path}: {e}")
+                    continue
+
+    except Exception as e:
+        logger.error(f"  [DOCX OCR] Gagal membuka DOCX sebagai ZIP: {e}")
+        return []
+
+    if not pages:
+        logger.warning("  [DOCX OCR] Semua gambar gagal di-OCR")
+        return []
+
+    logger.info(f"  [DOCX OCR] Selesai: {page_num} halaman, "
+                f"{sum(len(p.text) for p in pages)} total karakter")
+    return pages
 
 
 # ─────────────────────────────────────────────────────────────
@@ -362,20 +492,34 @@ def extract_text_from_pdf(
 
     if is_scanned_pdf(pdf_path, char_threshold=char_threshold):
         logger.info("→ Jenis PDF: SCANNED → menggunakan PaddleOCR")
-        return extract_scanned_pdf(
-            pdf_path, dpi=dpi, lang=lang, use_gpu=use_gpu,
-            skip_header_footer=skip_header_footer,
-            header_ratio=header_ratio,
-            footer_ratio=footer_ratio,
-        )
+        try:
+            return extract_scanned_pdf(
+                pdf_path, dpi=dpi, lang=lang, use_gpu=use_gpu,
+                skip_header_footer=skip_header_footer,
+                header_ratio=header_ratio,
+                footer_ratio=footer_ratio,
+            )
+        except Exception as e:
+            logger.error(f"OCR gagal untuk {pdf_path.name}: {e}")
+            raise RuntimeError(
+                f"OCR gagal memproses '{pdf_path.name}'. "
+                f"Mungkin file rusak atau tidak dapat dibaca. ({e})"
+            )
     else:
         logger.info("→ Jenis PDF: PURE → menggunakan PyMuPDF")
-        return extract_pure_pdf(
-            pdf_path,
-            skip_header_footer=skip_header_footer,
-            header_ratio=header_ratio,
-            footer_ratio=footer_ratio,
-        )
+        try:
+            return extract_pure_pdf(
+                pdf_path,
+                skip_header_footer=skip_header_footer,
+                header_ratio=header_ratio,
+                footer_ratio=footer_ratio,
+            )
+        except Exception as e:
+            logger.error(f"Ekstraksi teks PDF gagal untuk {pdf_path.name}: {e}")
+            raise RuntimeError(
+                f"Gagal mengekstrak teks dari '{pdf_path.name}'. "
+                f"Mungkin file rusak atau tidak didukung. ({e})"
+            )
 
 
 # ─────────────────────────────────────────────────────────────

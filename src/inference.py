@@ -264,14 +264,62 @@ def _extract_perihal_from_text(text: str) -> Optional[str]:
     """
     Ekstrak PERIHAL dari dokumen dengan mencari pola 'Perihal :', 'Hal :', dll.
     Ini lebih reliable daripada NER model untuk field ini.
+
+    Support format:
+      - 'Perihal : <isi>' (satu baris)
+      - 'Perihal\\n: <isi>' (kolon di baris berikutnya)
+      - 'Perihal\\n<isi>' (isi langsung di baris berikutnya)
     """
-    match = re.search(r'(?:perihal|hal|topik|subject)\s*:\s*([^\n]+)', text, re.IGNORECASE)
-    if match:
-        perihal_text = match.group(1).strip()
-        perihal_text = re.sub(r'\s+', ' ', perihal_text)
-        perihal_text = perihal_text.strip()
-        if perihal_text and len(perihal_text) > 2:
-            return perihal_text
+    patterns = [
+        r'(?:perihal|hal|topik|subject)\s*:\s*([^\n]+)',
+        r'(?:perihal|hal|topik|subject)\s*\n\s*:?\s*([^\n]+)',
+    ]
+    for pat in patterns:
+        match = re.search(pat, text, re.IGNORECASE)
+        if match:
+            perihal_text = match.group(1).strip()
+            perihal_text = re.sub(r'\s+', ' ', perihal_text)
+            perihal_text = perihal_text.strip()
+            if perihal_text and len(perihal_text) > 2:
+                validated = _validate_perihal(perihal_text)
+                if validated:
+                    return validated
+                # Jika PERIHAL terlihat seperti PENERIMA (Yth., Kepada),
+                # cari perihal asli dari konteks sekitar
+                alt = _find_alt_perihal(text)
+                if alt:
+                    return alt
+    return None
+
+
+def _validate_perihal(perihal_text: str) -> Optional[str]:
+    perihal_lower = perihal_text.lower()
+    if perihal_lower.startswith(('yth.', 'yth', 'kepada', 'kpd', 'y.th')):
+        return None
+    return perihal_text
+
+
+def _find_alt_perihal(text: str) -> Optional[str]:
+    """
+    Alternatif PERIHAL: cari teks setelah label 'Lampiran' atau 'Hal'.
+    Berguna untuk DOCX text box yang layout kolomnya tercampur.
+    """
+    patterns = [
+        r'lampiran\s*:\s*([^\n]+)',
+        r'lampiran\s*\n\s*:?\s*([^\n]+)',
+        r'hal\s*:\s*([^\n]+)',
+        r'hal\s*\n\s*:?\s*([^\n]+)',
+    ]
+    for pat in patterns:
+        match = re.search(pat, text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            candidate = re.sub(r'\s+', ' ', candidate)
+            if candidate and len(candidate) > 5 and len(candidate) < 120:
+                candidate_lower = candidate.lower()
+                exclude_prefixes = ('yth.', 'yth', 'kepada', 'kpd', 'y.th', '1 (satu)', 'satu', '0')
+                if not candidate_lower.startswith(exclude_prefixes):
+                    return candidate
     return None
 
 
@@ -315,9 +363,34 @@ def _extract_isi_from_text(
     text = re.sub(r'\[Halaman \d+\]\s*', '', text)
     text = _strip_kop_surat(text)
 
-    # Split jadi paragraf
+    # Split jadi paragraf — handle berbagai format line break
+    # DOCX text boxes sering tanpa baris kosong antar paragraf
     raw_paras = re.split(r'\n\s*\n', text)
     paras = [p.strip() for p in raw_paras if p.strip()]
+    
+    # Jika cuma satu paragraf panjang (DOCX text box),
+    # coba split ulang per baris kosong / baris terpendek
+    if len(paras) <= 2 and len(text) > 200:
+        # Split per baris dan kelompokkan menjadi paragraf logis
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        # Gabung baris yang berdekatan dengan threshold panjang
+        paras = []
+        current = []
+        for line in lines:
+            if any(kw in line.lower() for kw in ['nomor', 'lampiran', 'perihal', 'hal', 'kepada', 'yth', 'tanggal', 'dengan hormat', 'assalamu']):
+                if current:
+                    paras.append(' '.join(current))
+                current = [line]
+            elif line.startswith(':') or (len(line) < 40 and current):
+                current.append(line.replace(':', '').strip())
+            else:
+                if current and len(line) > 30:
+                    paras.append(' '.join(current))
+                    current = [line]
+                else:
+                    current.append(line)
+        if current:
+            paras.append(' '.join(current))
 
     # Pola kalimat pembuka isi surat
     _BODY_OPENER = re.compile(
