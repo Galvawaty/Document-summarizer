@@ -1,20 +1,4 @@
-"""
-api.py
-REST API untuk Document Summarizer — IndoBERT NER + LayoutLMv3 Table Detection.
-
-Endpoints:
-  POST /api/v1/summarize       — Upload PDF, jalankan NER, return ringkasan JSON
-  POST /api/v1/summarize/text  — Kirim teks langsung, jalankan NER
-  GET  /api/v1/health          — Health check
-  GET  /api/v1/labels          — Daftar NER labels yang didukung
-  GET  /                       — API info
-
-Deploy: Google Cloud Run
-  docker build -t doc-summarizer .
-  gcloud run deploy doc-summarizer --image gcr.io/PROJECT_ID/doc-summarizer
-"""
-
-from __future__ import annotations
+    from __future__ import annotations
 
 import os
 import time
@@ -171,6 +155,7 @@ class AsyncSummarizeResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 _start_time = time.time()
 _model_loaded = False
+_server_started = False  # Track apakah server benar-benar berhasil start
 
 
 def _ensure_model_loaded():
@@ -190,6 +175,7 @@ def _ensure_model_loaded():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: preload model jika env PRELOAD_MODEL=1."""
+    global _server_started
     logger.info(f"🚀 Starting {API_TITLE} v{API_VERSION}")
 
     if os.getenv("PRELOAD_MODEL", "0") == "1":
@@ -198,12 +184,20 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Model akan di-load saat request pertama (lazy loading)")
 
+    # Pastikan upload dir ada
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    _server_started = True
+
     yield
 
-    # Cleanup temp files
-    if UPLOAD_DIR.exists():
+    # Cleanup temp files HANYA jika server benar-benar berhasil start
+    # Ini mencegah server kedua yang gagal bind port menghapus
+    # folder temp milik server pertama yang masih berjalan
+    if _server_started and UPLOAD_DIR.exists():
         shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-    logger.info("🛑 API shutdown, temp files cleaned.")
+        logger.info("🛑 API shutdown, temp files cleaned.")
+    else:
+        logger.info("🛑 API shutdown (no temp cleanup — server did not fully start).")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -583,6 +577,8 @@ async def summarize_pdf(
         )
 
     # Simpan ke temp file
+    # Pastikan upload dir ada (bisa terhapus oleh shutdown instance lain)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     temp_path = UPLOAD_DIR / f"upload_{int(time.time()*1000)}_{file.filename or 'document.pdf'}"
     try:
         temp_path.write_bytes(content)
@@ -645,27 +641,7 @@ async def summarize_async(
     request: AsyncSummarizeRequest,
     background_tasks: BackgroundTasks,
 ):
-    """
-    Upload dokumen via URL (Convex storage) → proses async → callback ke Convex.
-
-    **Alur:**
-    1. Frontend upload file ke Convex File Storage
-    2. Frontend kirim `file_url` + `callback_url` ke endpoint ini
-    3. API langsung return `job_id` dengan status `queued`
-    4. Background task download file dari Convex → proses NER per halaman
-    5. Setelah selesai, POST hasil ke `callback_url` (Convex HTTP Action)
-    6. Frontend polling Convex query untuk melihat hasil
-
-    **Request:**
-    ```json
-    {
-      "file_url": "https://....convex.cloud/api/storage/...",
-      "callback_url": "https://....convex.cloud/api/http/callback-document-summarizer",
-      "filename": "surat_keterangan.pdf",
-      "include_raw_entities": false
-    }
-    ```
-    """
+    
     if not request.file_url:
         raise HTTPException(status_code=400, detail="file_url wajib diisi")
 

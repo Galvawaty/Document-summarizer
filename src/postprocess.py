@@ -28,8 +28,17 @@ _EXTRACT_NOMOR_SURAT_PATTERN = re.compile(
 )
 _TANGGAL_PATTERN = re.compile(r"(Depok,?\s*)?(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", re.IGNORECASE)
 _JENIS_DOKUMEN_PATTERN = re.compile(r"Hal\s*:\s*(.+)", re.IGNORECASE)
+_JENIS_DOKUMEN_DIRECT_PATTERN = re.compile(
+    r"^(?:(?:SURAT|NOTA|UNDANGAN|PENGUMUMAN|SK|SP)\s+[\w\s/-]+)(?:\n|$)",
+    re.MULTILINE,
+)
 _PENERIMA_PATTERN = re.compile(
     r"(?:Kepada\s+)?Yth\.?\s*\n?(.*?)(?=\n\s*(?:Dengan\s+hormat|Assalamu\s*alaikum|Salam\s+sejahtera|Dengan\s+Hormat))",
+    re.IGNORECASE | re.DOTALL
+)
+# Pattern untuk ekstrak pengirim dari signature block (bottom dokumen)
+_PENGIRIM_SIGNATURE_PATTERN = re.compile(
+    r"(?:(?:Ketua\s+Jurusan|a\.n\.\s+Direktur|Hormat\s+kami|Atas\s+perhatiannya|Demikian\s+(?:pengumuman|surat|undangan)\s+ini|Peksos|Direktur)\s*,?\s*\n+.*?\n+)(.+?)(?:\n\s*NIP(?:\.|\s)|\n\s*$)",
     re.IGNORECASE | re.DOTALL
 )
 
@@ -47,7 +56,12 @@ def extract_tanggal(text: str) -> Optional[str]:
 
 def extract_jenis_dokumen(text: str) -> Optional[str]:
     m = _JENIS_DOKUMEN_PATTERN.search(text)
-    return m.group(1).strip() if m else None
+    if m:
+        return m.group(1).strip()
+    m = _JENIS_DOKUMEN_DIRECT_PATTERN.search(text)
+    if m:
+        return m.group(0).strip()
+    return None
 
 def extract_penerima(text: str) -> Optional[str]:
     m = _PENERIMA_PATTERN.search(text)
@@ -57,13 +71,35 @@ def extract_penerima(text: str) -> Optional[str]:
         return "\n".join(lines)
     return None
 
+def extract_pengirim_dari_teks(text: str) -> Optional[str]:
+    """Ekstrak pengirim dari signature block / footer dokumen."""
+    lines = text.strip().split("\n")
+    # Cari baris yang mengandung NIP (indikasi signature block)
+    for i, line in enumerate(lines):
+        if re.match(r'^\s*NIP(?:\s|\.)', line, re.IGNORECASE):
+            # Ambil 1-3 baris sebelum NIP
+            start = max(0, i - 3)
+            context = '\n'.join(lines[start:i])
+            m = _PENGIRIM_SIGNATURE_PATTERN.search(context + '\n')
+            if m:
+                return m.group(1).strip()
+            # Fallback: ambil baris tepat sebelum NIP (biasanya nama)
+            if i - 1 >= 0:
+                name = lines[i - 1].strip()
+                if name and not _is_header_footer_noise(name):
+                    return name
+    return None
+
 
 # Dokumen yang dapat dijadikan fallback PERIHAL
 _PERIHAL_FALLBACK_DOC_TYPES = [
     "nota dinas",
     "surat keterangan lulus",
     "surat keterangan",
-    "pengumuman pengalihan perkuliahan",
+    "surat permohonan",
+    "surat undangan",
+    "pengumuman",
+    "pengalihan perkuliahan",
 ]
 
 
@@ -73,7 +109,7 @@ def _extract_fallback_perihal(text: str) -> Optional[str]:
     normalized_text = text.lower()
     for doc_type in _PERIHAL_FALLBACK_DOC_TYPES:
         if doc_type in normalized_text:
-            return doc_type
+            return doc_type.upper()
     return None
 
 
@@ -520,6 +556,12 @@ def build_output_json(
             normalized["PENGIRIM"] = filtered[-1] if filtered else None
         elif _is_header_footer_noise(str(pengirim)):
             normalized["PENGIRIM"] = None
+
+    # Fallback rule-based PENGIRIM dari signature block jika NER gagal
+    if not normalized.get("PENGIRIM") and raw_text:
+        reg_pengirim = extract_pengirim_dari_teks(raw_text)
+        if reg_pengirim:
+            normalized["PENGIRIM"] = reg_pengirim
 
     completeness = compute_completeness(normalized)
     filename     = Path(pdf_path).name if pdf_path else ""

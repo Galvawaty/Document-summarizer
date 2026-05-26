@@ -293,12 +293,23 @@ def _extract_fallback_perihal(text: str) -> Optional[str]:
     return None
 
 
-def _extract_isi_from_text(text: str, max_chars: int = 800) -> Optional[str]:
+def _extract_isi_from_text(
+    text: str,
+    max_chars: int = 800,
+    known_entities: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     """
     Ekstrak isi utama dokumen dengan pendekatan body-finder.
     Cari baris pertama yang mengandung kata pembuka isi surat
     (Kami menginformasikan, Bersama ini, Sehubungan dengan, dll.),
     lalu kumpulkan dari baris tersebut sampai max_chars.
+
+    Args:
+        text            : Teks dokumen penuh.
+        max_chars       : Batas karakter ISI.
+        known_entities  : Dict entitas yang sudah ditemukan oleh NER.
+                          Paragraf yang cocok dengan entitas lain akan dilewati
+                          agar ISI tidak mengandung PENGIRIM, PENERIMA, dll.
     """
     # Hapus marker [Halaman N] yang ditambahkan oleh pages_to_full_text()
     text = re.sub(r'\[Halaman \d+\]\s*', '', text)
@@ -323,17 +334,58 @@ def _extract_isi_from_text(text: str, max_chars: int = 800) -> Optional[str]:
         re.IGNORECASE,
     )
 
-    # Pola paragraf yang harus dilewati (metadata, penerima, pembuka)
+    # Pola paragraf yang harus dilewati (metadata, penerima, pembuka, signature)
     _SKIP_PARA = re.compile(
         r'^\s*(?:'
-        r'nomor\s*:|nip\s*:|kepada\s*|yth\.?\s*|dari\s*:|'
-        r'perihal\s*:|hal\s*:|tanggal\s*:|lampiran\s*:|'
+        r'nomor\s*:|no\s*\.?\s*:|nip\s*[:\.]|kepada\s*|yth\.?\s*|dari\s*:|'
+        r'perihal\s*:|hal\s*:|tanggal\s*:|lampiran\s*:|sifat\s*:|'
         r'dengan\s+hormat|assalamu|salam\s+sejahtera|'
         r'tembusan\s*:|cc\s*:|'
+        r'hormat\s+kami|atas\s+perhatian|demikian\s+(?:surat|undangan|pengumuman|pemberitahuan)|'
+        r'a\.n\.\s|ketua\s+jurusan|direktur|sekretaris|'
         r'[=\-_]{3,}'
         r')',
         re.IGNORECASE,
     )
+
+    # Pola paragraf signature block / footer yang harus dihentikan
+    _STOP_PARA = re.compile(
+        r'^\s*(?:'
+        r'hormat\s+kami|atas\s+perhatian|demikian\s+|'
+        r'a\.n\.\s|ttd\.?|'
+        r'tembusan\s*:|cc\s*:|'
+        r'NIP\s*[:\.]'
+        r')',
+        re.IGNORECASE,
+    )
+
+    # Kumpulkan nilai entitas lain yang sudah dikenali oleh NER
+    # Paragraf yang mengandung value entitas ini akan dilewati
+    _entity_values_to_skip: List[str] = []
+    if known_entities:
+        for key in ("PENGIRIM", "PENERIMA", "PERIHAL", "NOMOR_SURAT", "TANGGAL", "LOKASI"):
+            val = known_entities.get(key)
+            if val:
+                if isinstance(val, list):
+                    for v in val:
+                        v_str = str(v).strip()
+                        if len(v_str) >= 5:  # hanya skip jika cukup spesifik
+                            _entity_values_to_skip.append(v_str.lower())
+                else:
+                    v_str = str(val).strip()
+                    if len(v_str) >= 5:
+                        _entity_values_to_skip.append(v_str.lower())
+
+    def _paragraph_matches_other_entity(para: str) -> bool:
+        """Cek apakah paragraf ini sebagian besar adalah nilai entitas lain."""
+        para_lower = para.lower().strip()
+        for ev in _entity_values_to_skip:
+            # Jika paragraf sangat mirip dengan value entitas lain (>70% overlap)
+            if ev in para_lower and len(ev) / max(len(para_lower), 1) > 0.5:
+                return True
+            if para_lower in ev:
+                return True
+        return False
 
     collected = []
     found_body = False
@@ -343,6 +395,10 @@ def _extract_isi_from_text(text: str, max_chars: int = 800) -> Optional[str]:
         if not stripped:
             continue
 
+        # Stop jika menemukan signature block / footer
+        if found_body and _STOP_PARA.match(stripped):
+            break
+
         if not found_body:
             # Cek apakah ini baris tanggal/metadata (angka + kata singkat)
             if re.match(r'^\d+\s+\w+\s+\d{4}$', stripped):
@@ -351,11 +407,21 @@ def _extract_isi_from_text(text: str, max_chars: int = 800) -> Optional[str]:
                 continue
             if len(stripped) < 50:
                 continue
+            # Skip paragraf yang cocok dengan entitas lain
+            if _paragraph_matches_other_entity(stripped):
+                continue
             # Cari pembuka isi surat
             if _BODY_OPENER.search(stripped):
                 found_body = True
             else:
                 continue
+
+        # Setelah body ditemukan, tetap filter paragraf entitas lain
+        if _paragraph_matches_other_entity(stripped):
+            continue
+        # Skip juga metadata yang terselip di tengah body
+        if _SKIP_PARA.match(stripped):
+            continue
 
         collected.append(stripped)
 
@@ -487,7 +553,9 @@ def run_ner(
     # Selalu gunakan rule-based extraction untuk ISI karena:
     # 1. NER sering menghasilkan ISI yang mengandung kop surat
     # 2. Rule-based sudah menghapus kop surat via _strip_kop_surat
-    isi = _extract_isi_from_text(text)
+    # 3. Melewatkan known_entities agar ISI tidak mengandung
+    #    teks yang sudah tercapture sebagai PENGIRIM, PENERIMA, dll.
+    isi = _extract_isi_from_text(text, known_entities=entities)
     if isi:
         entities["ISI"] = isi
 

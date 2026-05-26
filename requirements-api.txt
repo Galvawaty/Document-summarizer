@@ -17,19 +17,20 @@ torchvision==0.17.2+cpu
 sentencepiece==0.2.0
 accelerate==0.29.3
 
-# ── PDF Processing ───────────────────────────────────────────
+# ── PDF / DOCX Processing ────────────────────────────────────
 pymupdf==1.23.26
+python-docx==1.1.2
 Pillow==10.3.0
 numpy==1.26.4
 opencv-python-headless==4.9.0.80
 
-# ── OCR (optional — bisa dihapus jika hanya pure PDF) ───────
-# paddlepaddle==2.6.2
-# paddleocr==2.7.3
-
+# ── OCR ──────────────────────────────────────────────────────
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+  
 # ── Utilities ────────────────────────────────────────────────
 loguru>=0.7.0
-protobuf==3.20.0
+protobuf>=3.20.0,<5.0.0
 pydantic>=2.0.0
 
 # ── Async HTTP (Convex callback) ─────────────────────────────
