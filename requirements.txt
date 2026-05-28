@@ -1,9 +1,3 @@
-# ─────────────────────────────────────────────────────────────
-# requirements-api.txt
-# Dependencies untuk API deployment (Cloud Run)
-# Menggunakan CPU-only PyTorch untuk ukuran image lebih kecil
-# ─────────────────────────────────────────────────────────────
-
 # ── Web Framework ────────────────────────────────────────────
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
@@ -16,6 +10,8 @@ torch==2.2.2+cpu
 torchvision==0.17.2+cpu
 sentencepiece==0.2.0
 accelerate==0.29.3
+datasets==2.18.0
+seqeval==1.2.2
 
 # ── PDF / DOCX Processing ────────────────────────────────────
 pymupdf==1.23.26
@@ -27,16 +23,12 @@ opencv-python-headless==4.9.0.80
 # ── OCR ──────────────────────────────────────────────────────
 paddlepaddle==2.6.2
 paddleocr==2.7.3
-  
+
 # ── Utilities ────────────────────────────────────────────────
 loguru>=0.7.0
 protobuf>=3.20.0,<5.0.0
 pydantic>=2.0.0
-
-# ── Async HTTP (Convex callback) ─────────────────────────────
 httpx>=0.27.0
-
-# ── Data ─────────────────────────────────────────────────────
 pandas>=2.0.0
 pyarrow>=14.0.0
 
