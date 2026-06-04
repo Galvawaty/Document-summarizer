@@ -622,6 +622,10 @@ def run_ner(
         if fallback_perihal:
             entities["PERIHAL"] = fallback_perihal
 
+    # Jika JENIS_DOKUMEN kosong, gunakan PERIHAL sebagai JENIS_DOKUMEN
+    if not entities.get("JENIS_DOKUMEN") and entities.get("PERIHAL"):
+        entities["JENIS_DOKUMEN"] = entities["PERIHAL"]
+
     # ── Ekstrak ISI (isi utama dokumen) ─────────────────────────
     # Selalu gunakan rule-based extraction untuk ISI karena:
     # 1. NER sering menghasilkan ISI yang mengandung kop surat

@@ -514,6 +514,11 @@ def build_output_json(
         else:
             normalized["JENIS_DOKUMEN"] = None
 
+    # Jika JENIS_DOKUMEN masih kosong, gunakan PERIHAL sebagai JENIS_DOKUMEN
+    if not is_valid_jenis_dokumen(normalized.get("JENIS_DOKUMEN")):
+        if normalized.get("PERIHAL"):
+            normalized["JENIS_DOKUMEN"] = normalized["PERIHAL"]
+
     # Fallback regex untuk TANGGAL jika tidak terdeteksi oleh NER atau tidak valid
     if not is_valid_tanggal(normalized.get("TANGGAL")):
         if raw_text:

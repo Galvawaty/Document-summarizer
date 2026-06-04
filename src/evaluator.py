@@ -157,18 +157,18 @@ def _build_confusion(
     for true_lbl, pred_counts in sorted(matrix.items()):
         if true_lbl == "O":
             continue
-        errors = {
-            pred_lbl: cnt
+        errors = [
+            (pred_lbl, cnt)
             for pred_lbl, cnt in sorted(pred_counts.items(), key=lambda x: -x[1])
             if pred_lbl != true_lbl
-        }[:top_n]
+        ][:top_n]
         correct = pred_counts.get(true_lbl, 0)
         total   = sum(pred_counts.values())
         result[true_lbl] = {
             "correct":      correct,
             "total":        total,
             "accuracy":     round(correct / total, 4) if total else 0,
-            "top_errors":   dict(list(errors.items())[:top_n]),
+            "top_errors":   dict(errors[:top_n]),
         }
 
     return result
