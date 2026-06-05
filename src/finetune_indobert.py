@@ -50,6 +50,8 @@ from src.dataset import (
     split_dataset,
 )
 from src.model import build_model, get_device
+from src.trainer import make_dataloader
+from src.evaluator import evaluate_model
 
 
 # ══════════════════════════════════════════════════════════════
@@ -525,6 +527,24 @@ def finetune_indobert(
             f"P={test_result['test_precision']:.4f} | "
             f"R={test_result['test_recall']:.4f}"
         )
+
+        # ── Deep evaluation: confusion matrix + per-label ─────────
+        logger.info("\nEvaluasi Deep Test Set (confusion matrix)...")
+        test_loader = make_dataloader(test_ds, batch_size=batch_size*2, shuffle=False)
+        deep_eval = evaluate_model(model, test_loader, get_device())
+        test_result["confusion"] = deep_eval["confusion"]
+        test_result["per_label"] = deep_eval["per_label"]
+        test_result["overall_f1"] = deep_eval["overall_f1"]
+        test_result["overall_precision"] = deep_eval["overall_precision"]
+        test_result["overall_recall"] = deep_eval["overall_recall"]
+
+        # ── Evaluasi training set ──────────────────────────────────
+        logger.info("\nEvaluasi Training Set...")
+        train_loader = make_dataloader(train_ds, batch_size=batch_size*2, shuffle=False)
+        train_eval = evaluate_model(model, train_loader, get_device())
+        train_result.metrics["train_f1"] = train_eval["overall_f1"]
+        train_result.metrics["train_precision"] = train_eval["overall_precision"]
+        train_result.metrics["train_recall"] = train_eval["overall_recall"]
     else:
         test_result = {}
 
@@ -575,6 +595,10 @@ def finetune_indobert(
     logger.info(f"  Strategy        : {strategy.upper()}")
     logger.info(f"  Epochs          : {epochs}")
     logger.info(f"  Train Loss      : {train_result.metrics.get('train_loss', 0):.4f}")
+    if hasattr(train_result, 'metrics') and 'train_f1' in train_result.metrics:
+        logger.info(f"  Train F1        : {train_result.metrics['train_f1']:.4f}")
+        logger.info(f"  Train Precision : {train_result.metrics['train_precision']:.4f}")
+        logger.info(f"  Train Recall    : {train_result.metrics['train_recall']:.4f}")
     logger.info(f"  Train Samples   : {len(train_data)}")
     logger.info(f"  Val Samples     : {len(val_data)}")
     logger.info(f"  Test Samples    : {len(test_data)}")
@@ -585,6 +609,9 @@ def finetune_indobert(
         logger.info(f"    Precision     : {test_result.get('test_precision', 0):.4f}")
         logger.info(f"    Recall        : {test_result.get('test_recall', 0):.4f}")
         logger.info(f"    Loss          : {test_result.get('test_loss', 0):.4f}")
+        logger.info(f"    Deep F1       : {test_result.get('overall_f1', 0):.4f}")
+        logger.info(f"    Deep P        : {test_result.get('overall_precision', 0):.4f}")
+        logger.info(f"    Deep R        : {test_result.get('overall_recall', 0):.4f}")
     
     logger.info(f"\n  Model           : {output_dir}")
     logger.info(f"  Report          : {report_path}")

@@ -18,7 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from loguru import logger
-from seqeval.metrics import classification_report, f1_score
+from seqeval.metrics import (
+    classification_report, f1_score, precision_score, recall_score,
+)
 from torch.utils.data import DataLoader
 
 from config import BIO_LABELS, ID2LABEL, LABELS, LABEL2ID, model_cfg
@@ -71,7 +73,9 @@ def evaluate_model(
     report_dict = _parse_seqeval_report(all_trues_seq, all_preds_seq)
 
     # ── Overall metrics ────────────────────────────────────────
-    overall_f1 = f1_score(all_trues_seq, all_preds_seq)
+    overall_f1        = f1_score(all_trues_seq, all_preds_seq)
+    overall_precision = precision_score(all_trues_seq, all_preds_seq)
+    overall_recall    = recall_score(all_trues_seq, all_preds_seq)
 
     # ── Token-level confusion matrix (per label) ──────────────
     confusion = _build_confusion(all_trues_flat, all_preds_flat)
@@ -80,16 +84,18 @@ def evaluate_model(
     errors = _find_errors(all_preds_seq, all_trues_seq, max_examples=20)
 
     report = {
-        "loss":         round(avg_loss, 6),
-        "overall_f1":   round(overall_f1, 6),
-        "per_label":    report_dict,
-        "confusion":    confusion,
-        "errors":       errors,
-        "report_text":  report_str,
+        "loss":              round(avg_loss, 6),
+        "overall_f1":        round(overall_f1, 6),
+        "overall_precision": round(overall_precision, 6),
+        "overall_recall":    round(overall_recall, 6),
+        "per_label":         report_dict,
+        "confusion":         confusion,
+        "errors":            errors,
+        "report_text":       report_str,
     }
 
     logger.info(f"\n{'='*60}\nEvaluasi Model\n{'='*60}")
-    logger.info(f"Loss: {avg_loss:.4f} | Overall F1: {overall_f1:.4f}")
+    logger.info(f"Loss: {avg_loss:.4f} | F1: {overall_f1:.4f} | P: {overall_precision:.4f} | R: {overall_recall:.4f}")
     logger.info(f"\n{report_str}")
 
     if save_path:
