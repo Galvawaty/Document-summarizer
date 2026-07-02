@@ -7,33 +7,10 @@ from typing import List, Optional
 
 from loguru import logger
 
-# Lazy imports agar tidak crash bila salah satu lib belum di-install
-try:
-    import fitz  # PyMuPDF
-    _PYMUPDF_AVAILABLE = True
-except ImportError:
-    _PYMUPDF_AVAILABLE = False
-    logger.warning("PyMuPDF (fitz) tidak terinstall. Pure PDF tidak akan bisa dibaca.")
-
-try:
-    from PIL import Image
-    _PIL_AVAILABLE = True
-except ImportError:
-    _PIL_AVAILABLE = False
-
-try:
-    from paddleocr import PaddleOCR
-    _PADDLEOCR_AVAILABLE = True
-except ImportError:
-    _PADDLEOCR_AVAILABLE = False
-    logger.warning("PaddleOCR tidak terinstall. Scanned PDF tidak akan bisa dibaca.")
-
-try:
-    from docx import Document as DocxDocument
-    _DOCX_AVAILABLE = True
-except ImportError:
-    _DOCX_AVAILABLE = False
-    logger.warning("python-docx tidak terinstall. DOCX tidak akan bisa dibaca.")
+import fitz  # PyMuPDF
+from PIL import Image
+from paddleocr import PaddleOCR
+from docx import Document as DocxDocument
 
 
 # ─────────────────────────────────────────────────────────────
@@ -55,8 +32,6 @@ _ocr_instance: Optional["PaddleOCR"] = None
 def _get_ocr(lang: str = "id", use_gpu: bool = False) -> "PaddleOCR":
     global _ocr_instance
     if _ocr_instance is None:
-        if not _PADDLEOCR_AVAILABLE:
-            raise RuntimeError("PaddleOCR tidak terinstall. Jalankan: pip install paddleocr")
         logger.info("Inisialisasi PaddleOCR...")
         _ocr_instance = PaddleOCR(
             use_angle_cls=True,
@@ -77,10 +52,6 @@ def is_scanned_pdf(pdf_path: str | Path, char_threshold: int = 50) -> bool:
     Strategi: buka dokumen, hitung total karakter teks dari semua halaman.
     Jika < char_threshold → dianggap scanned.
     """
-    if not _PYMUPDF_AVAILABLE:
-        logger.warning("PyMuPDF tidak tersedia, asumsikan scanned PDF.")
-        return True
-
     doc = fitz.open(str(pdf_path))
     total_chars = sum(len(page.get_text().strip()) for page in doc)
     doc.close()
@@ -99,7 +70,7 @@ def is_scanned_pdf(pdf_path: str | Path, char_threshold: int = 50) -> bool:
 def extract_pure_pdf(
     pdf_path: str | Path,
     skip_header_footer: bool = True,
-    header_ratio: float = 0.12,
+    header_ratio: float = 0.20,
     footer_ratio: float = 0.10,
 ) -> List[PageText]:
     """
@@ -109,9 +80,6 @@ def extract_pure_pdf(
     (footer_ratio) dari setiap halaman dipotong agar kop surat dan
     footer institusi tidak ikut terbaca.
     """
-    if not _PYMUPDF_AVAILABLE:
-        raise RuntimeError("PyMuPDF tidak terinstall. Jalankan: pip install pymupdf")
-
     results: List[PageText] = []
     doc = fitz.open(str(pdf_path))
 
@@ -165,11 +133,6 @@ def extract_scanned_pdf(
     Jika skip_header_footer=True, gambar di-crop untuk menghilangkan
     area header dan footer sebelum OCR dijalankan.
     """
-    if not _PYMUPDF_AVAILABLE:
-        raise RuntimeError("PyMuPDF tidak terinstall.")
-    if not _PIL_AVAILABLE:
-        raise RuntimeError("Pillow tidak terinstall. Jalankan: pip install Pillow")
-
     ocr = _get_ocr(lang=lang, use_gpu=use_gpu)
     results: List[PageText] = []
 
@@ -294,11 +257,6 @@ def extract_text_from_docx(docx_path: str | Path) -> List[PageText]:
         List[PageText] — karena DOCX tidak punya konsep "halaman" secara
         native, seluruh isi dikembalikan sebagai satu PageText (page 1).
     """
-    if not _DOCX_AVAILABLE:
-        raise RuntimeError(
-            "python-docx tidak terinstall. Jalankan: pip install python-docx"
-        )
-
     docx_path = Path(docx_path)
     logger.info(f"Membaca DOCX: {docx_path.name}")
 
@@ -364,7 +322,7 @@ def extract_text_from_docx(docx_path: str | Path) -> List[PageText]:
     cleaned = _clean_text(body_text)
 
     # Jika DOCX tidak punya teks, coba ekstrak gambar dan OCR
-    if not cleaned and _PADDLEOCR_AVAILABLE:
+    if not cleaned:
         logger.info("  DOCX tidak memiliki teks → mencoba OCR dari gambar embedded...")
         ocr_pages = _extract_docx_images_ocr(docx_path, doc)
         if ocr_pages:
@@ -399,8 +357,7 @@ def _extract_docx_images_ocr(docx_path: Path, doc: "DocxDocument") -> List[PageT
     """
     import zipfile
 
-    if not _PADDLEOCR_AVAILABLE or not _PIL_AVAILABLE:
-        return []
+
 
     from PIL import Image as PILImage
 
@@ -481,7 +438,7 @@ def extract_text_from_pdf(
     lang: str = "id",
     use_gpu: bool = False,
     skip_header_footer: bool = True,
-    header_ratio: float = 0.12,
+    header_ratio: float = 0.20,
     footer_ratio: float = 0.10,
 ) -> List[PageText]:
     pdf_path = Path(pdf_path)

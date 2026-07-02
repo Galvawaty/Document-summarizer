@@ -33,13 +33,6 @@ from transformers import (
 )
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 
-try:
-    from datasets import load_dataset
-    HAS_DATASETS = True
-except ImportError:
-    HAS_DATASETS = False
-    logger.warning("datasets library not found. HF dataset mode will be disabled.")
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import CKPT_DIR, ID2LABEL, LABEL2ID, NUM_LABELS, LABELS, model_cfg
 from src.dataset import (
@@ -353,7 +346,6 @@ def finetune_indobert(
     unfreeze_every: int     = 2,
     fp16: bool              = True,
     patience: int           = 5,
-    combine_hf: bool        = False,
     resume_from: Optional[str] = None,
     seed: int               = 42,
 ):
@@ -371,8 +363,6 @@ def finetune_indobert(
     torch.manual_seed(seed)
     logger.info(f"\n{'═'*60}")
     logger.info(f"  Fine-tune IndoBERT | Strategi: {strategy.upper()}")
-    if combine_hf:
-        logger.info(f"  Data: HuggingFace + Local")
     logger.info(f"{'═'*60}")
 
     # ── GPU Detection ─────────────────────────────────────────
@@ -627,8 +617,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="Fine-tuning IndoBERT NER")
     p.add_argument("--dataset",      required=True,
                    help="Path ke local dataset JSON")
-    p.add_argument("--combine-hf",   action="store_true",
-                   help="Combine HF indo-ner-dataset dengan local data untuk training")
     p.add_argument("--output",       default=str(CKPT_DIR / "indobert-ner-finetuned"))
     p.add_argument("--strategy",     default="full",
                    choices=["full", "llrd", "progressive"],
@@ -690,7 +678,6 @@ if __name__ == "__main__":
         unfreeze_every      = args.unfreeze_every,
         fp16                = use_fp16,
         patience            = args.patience,
-        combine_hf          = args.combine_hf,
         resume_from         = resume,
         seed                = args.seed,
     )

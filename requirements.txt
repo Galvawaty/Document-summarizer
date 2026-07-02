@@ -10,7 +10,6 @@ torch==2.2.2+cpu
 torchvision==0.17.2+cpu
 sentencepiece==0.2.0
 accelerate==0.29.3
-datasets==2.18.0
 seqeval==1.2.2
 
 # ── PDF / DOCX Processing ────────────────────────────────────

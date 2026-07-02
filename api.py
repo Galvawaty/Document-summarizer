@@ -151,49 +151,25 @@ class AsyncSummarizeResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
-# State global
-# ─────────────────────────────────────────────────────────────
-_start_time = time.time()
-_model_loaded = False
-_server_started = False  # Track apakah server benar-benar berhasil start
-
-
-def _ensure_model_loaded():
-    """Lazy load model saat request pertama."""
-    global _model_loaded
-    if not _model_loaded:
-        from src.inference import load_model
-        logger.info("Lazy loading NER model...")
-        load_model()
-        _model_loaded = True
-        logger.info("NER model loaded successfully.")
-
-
-# ─────────────────────────────────────────────────────────────
 # Lifespan (startup / shutdown)
 # ─────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: preload model jika env PRELOAD_MODEL=1."""
-    global _server_started
+    """Startup: preload NER model."""
     logger.info(f"🚀 Starting {API_TITLE} v{API_VERSION}")
 
-    if os.getenv("PRELOAD_MODEL", "0") == "1":
-        logger.info("PRELOAD_MODEL=1 → loading model at startup...")
-        _ensure_model_loaded()
-    else:
-        logger.info("Model akan di-load saat request pertama (lazy loading)")
+    from src.inference import load_model
+    logger.info("Loading NER model...")
+    load_model()
+    logger.info("NER model loaded successfully.")
 
     # Pastikan upload dir ada
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    _server_started = True
 
     yield
 
-    # Cleanup temp files HANYA jika server benar-benar berhasil start
-    # Ini mencegah server kedua yang gagal bind port menghapus
-    # folder temp milik server pertama yang masih berjalan
-    if _server_started and UPLOAD_DIR.exists():
+    # Cleanup temp files
+    if UPLOAD_DIR.exists():
         shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
         logger.info("🛑 API shutdown, temp files cleaned.")
     else:
@@ -247,7 +223,6 @@ def _process_text(text: str, include_raw: bool = False) -> Dict[str, Any]:
     from src.postprocess import build_output_json
 
     start = time.time()
-    _ensure_model_loaded()
 
     entities = run_ner(text)
 
@@ -302,8 +277,6 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
         generate_table_summary,
     )
 
-    _ensure_model_loaded()
-
     pages = extract_text_from_document(pdf_path)
     full_text = pages_to_full_text(pages)
 
@@ -318,6 +291,18 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
     ner_pdf_path = str(pdf_path) if pdf_path.suffix.lower() == ".pdf" else None
     doc_entities = run_ner(ner_text, pdf_path=ner_pdf_path)
 
+    # Build structured output (document-level) — dengan normalized entities
+    structured = build_output_json(
+        raw_entities=doc_entities,
+        pdf_path=str(pdf_path),
+        pdf_type=pdf_type,
+        page_count=len(pages),
+        raw_text=full_text,
+    )
+
+    # Gunakan normalized entities untuk per-page borrowing (bukan raw NER)
+    normalized_entities = structured["ringkasan"]
+
     # Fields global yang di-borrow dari document-level ke per-page
     _GLOBAL_FIELDS = [
         "NOMOR_SURAT", "JENIS_DOKUMEN", "TANGGAL",
@@ -326,16 +311,16 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
     _ALL_FIELDS = _GLOBAL_FIELDS + ["ISI", "TABEL"]
 
     # Per-page processing
-    per_page_results = []
+    per_page_clean = []
     for page in pages:
         page_text = page.text.strip()
         page_num = page.page_number
 
         if not page_text:
-            per_page_results.append({
+            per_page_clean.append({
                 "page": page_num,
                 "page_type": "lainnya",
-                "entities": {},
+                "entities": {k: None for k in _ALL_FIELDS},
                 "summary": f"Halaman {page_num} tidak mengandung teks.",
                 "structured_content": None,
             })
@@ -346,10 +331,10 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
         if page_type == "jadwal":
             items = parse_schedule(page_text)
             summary = generate_schedule_summary(page_num, items)
-            per_page_results.append({
+            per_page_clean.append({
                 "page": page_num,
                 "page_type": "jadwal",
-                "entities": {},
+                "entities": {k: None for k in _ALL_FIELDS},
                 "summary": summary,
                 "structured_content": {"type": "schedule", "items": items},
             })
@@ -357,10 +342,10 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
         elif page_type == "tabel":
             table_data = parse_table(page_text, max_cols=3)
             summary = generate_table_summary(page_num, table_data)
-            per_page_results.append({
+            per_page_clean.append({
                 "page": page_num,
                 "page_type": "tabel",
-                "entities": {},
+                "entities": {k: None for k in _ALL_FIELDS},
                 "summary": summary,
                 "structured_content": table_data,
             })
@@ -369,9 +354,9 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
             # Run NER untuk halaman surat/lainnya
             page_entities = run_ner(page_text)
 
-            # Borrow global fields dari document-level untuk konsistensi
+            # Borrow global fields dari document-level (sudah dinormalisasi)
             for field in _GLOBAL_FIELDS:
-                doc_val = doc_entities.get(field)
+                doc_val = normalized_entities.get(field)
                 if doc_val:
                     # Untuk NOMOR_SURAT, validasi dulu
                     if field == "NOMOR_SURAT" and is_valid_nomor_surat(doc_val):
@@ -383,35 +368,16 @@ def _process_pdf_with_per_page(pdf_path: Path) -> Dict[str, Any]:
                 page_entities,
                 filename=f"{Path(pdf_path).name} halaman {page_num}",
             )
-            per_page_results.append({
+
+            entities_clean = {k: page_entities.get(k) for k in _ALL_FIELDS}
+            per_page_clean.append({
                 "page": page_num,
                 "page_type": page_type,
-                "entities": page_entities,
+                "entities": entities_clean,
                 "summary": page_summary,
                 "structured_content": None,
             })
 
-    # Build structured output (document-level)
-    structured = build_output_json(
-        raw_entities=doc_entities,
-        pdf_path=str(pdf_path),
-        pdf_type=pdf_type,
-        page_count=len(pages),
-        raw_text=full_text,
-    )
-
-    # Clean per-page entities to match standard keys
-    per_page_clean = []
-    for r in per_page_results:
-        entities_raw = r.get("entities") or {}
-        entities_clean = {k: entities_raw.get(k) for k in _ALL_FIELDS}
-        per_page_clean.append({
-            "page": r["page"],
-            "page_type": r["page_type"],
-            "entities": entities_clean,
-            "summary": r["summary"],
-            "structured_content": r.get("structured_content"),
-        })
     structured["per_page_summaries"] = per_page_clean
 
     return structured
@@ -515,8 +481,8 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         version=API_VERSION,
-        model_loaded=_model_loaded,
-        uptime_seconds=round(time.time() - _start_time, 2),
+        model_loaded=True,
+        uptime_seconds=0.0,
     )
 
 

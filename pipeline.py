@@ -134,28 +134,6 @@ def _format_entities_for_display(entities: Dict[str, Any]) -> str:
         else:
             output.append(f"{name}: -")
     
-    # Label umum (HuggingFace)
-    output.append("\n\n[ENTITAS UMUM - GENERAL NER]")
-    output.append("-" * 70)
-    
-    hf_labels = ["PER", "LOC", "ORG", "TIME", "TIT"]
-    label_names = {
-        "PER": "NAMA ORANG (Person)",
-        "LOC": "LOKASI (Location)",
-        "ORG": "ORGANISASI (Organization)",
-        "TIME": "WAKTU (Time)",
-        "TIT": "JUDUL (Title)",
-    }
-    
-    for label in hf_labels:
-        value = entities.get(label)
-        name = label_names.get(label, label)
-        if value:
-            truncated = value[:60] + "..." if len(value) > 60 else value
-            output.append(f"{name}: {truncated}")
-        else:
-            output.append(f"{name}: -")
-    
     output.append("\n" + "="*70 + "\n")
     return "\n".join(output)
 

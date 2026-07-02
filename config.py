@@ -39,17 +39,6 @@ LOCAL_LABELS: List[str] = [
     "LOKASI",        # Label 9  (dataset baru)
 ]
 
-# Label dari HuggingFace indo-ner-dataset (general NER)
-HF_LABELS: List[str] = [
-    "PER",           # Person
-    "LOC",           # Location
-    "ORG",           # Organization
-    "TIME",          # Temporal expression
-    "TIT",           # Title
-]
-
-# Gabungan semua label (local + HF)
-# LABELS: List[str] = LOCAL_LABELS + HF_LABELS
 LABELS: List[str] = LOCAL_LABELS
 
 # BIO tagging scheme: B-<label>, I-<label>, O
